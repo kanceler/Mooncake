@@ -177,6 +177,18 @@ class MasterServiceTest : public ::testing::Test {
                 .has_value());
     }
 
+    void PutCompletedObjectWithType(MasterService& service,
+                                    const UUID& client_id,
+                                    const std::string& key,
+                                    ObjectDataType data_type,
+                                    bool with_soft_pin = false) const {
+        ReplicateConfig config;
+        config.replica_num = 1;
+        config.data_type = data_type;
+        config.with_soft_pin = with_soft_pin;
+        PutCompletedObject(service, client_id, key, config);
+    }
+
     void PutCompletedObject(MasterService& service, const UUID& client_id,
                             const std::string& key,
                             const std::string& tenant_id,
@@ -1167,6 +1179,122 @@ TEST_F(MasterServiceTest, GroupedLeaseRefreshNearExpiryProtectsCurrentMembers) {
 
     EXPECT_TRUE(service_->Remove(key_a, "default", /*force=*/true).has_value());
     EXPECT_TRUE(service_->Remove(key_b, "default", /*force=*/true).has_value());
+}
+
+TEST_F(MasterServiceTest, ObjectTypeLeasePolicyOverridesResponseTtl) {
+    ObjectTypeLeasePolicy weight_policy;
+    weight_policy.lease_ttl = 900;
+
+    auto service_config =
+        MasterServiceConfig::builder()
+            .set_default_kv_lease_ttl(100)
+            .set_object_type_lease_policy(ObjectDataType::WEIGHT,
+                                          weight_policy)
+            .build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(*service_);
+    const UUID client_id = generate_uuid();
+
+    PutCompletedObjectWithType(*service_, client_id, "weight_key",
+                               ObjectDataType::WEIGHT);
+    PutCompletedObjectWithType(*service_, client_id, "kvcache_key",
+                               ObjectDataType::KVCACHE);
+
+    auto weight_result = service_->GetReplicaList("weight_key", "default");
+    ASSERT_TRUE(weight_result.has_value());
+    EXPECT_EQ(weight_result->lease_ttl_ms, 900);
+
+    auto kv_result = service_->GetReplicaList("kvcache_key", "default");
+    ASSERT_TRUE(kv_result.has_value());
+    EXPECT_EQ(kv_result->lease_ttl_ms, 100);
+}
+
+TEST_F(MasterServiceTest,
+       ObjectTypeLeasePolicyUsesSoftPinnedHardLeaseTtl) {
+    ObjectTypeLeasePolicy weight_policy;
+    weight_policy.lease_ttl = 200;
+    weight_policy.soft_pinned_lease_ttl = 1200;
+
+    auto service_config =
+        MasterServiceConfig::builder()
+            .set_default_kv_lease_ttl(100)
+            .set_object_type_lease_policy(ObjectDataType::WEIGHT,
+                                          weight_policy)
+            .build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(*service_);
+    const UUID client_id = generate_uuid();
+
+    PutCompletedObjectWithType(*service_, client_id, "soft_weight_key",
+                               ObjectDataType::WEIGHT,
+                               /*with_soft_pin=*/true);
+    PutCompletedObjectWithType(*service_, client_id, "plain_weight_key",
+                               ObjectDataType::WEIGHT,
+                               /*with_soft_pin=*/false);
+
+    auto soft_result =
+        service_->GetReplicaList("soft_weight_key", "default");
+    ASSERT_TRUE(soft_result.has_value());
+    EXPECT_EQ(soft_result->lease_ttl_ms, 1200);
+
+    auto plain_result =
+        service_->GetReplicaList("plain_weight_key", "default");
+    ASSERT_TRUE(plain_result.has_value());
+    EXPECT_EQ(plain_result->lease_ttl_ms, 200);
+}
+
+TEST_F(MasterServiceTest, ObjectTypeLeasePolicyOverridesSoftPinTtl) {
+    const uint64_t kv_lease_ttl = 50;
+    const uint64_t default_soft_pin_ttl = 100;
+    const uint64_t weight_soft_pin_ttl = 1000;
+
+    ObjectTypeLeasePolicy weight_policy;
+    weight_policy.lease_ttl = kv_lease_ttl;
+    weight_policy.soft_pin_ttl = weight_soft_pin_ttl;
+
+    auto service_config =
+        MasterServiceConfig::builder()
+            .set_default_kv_lease_ttl(kv_lease_ttl)
+            .set_default_kv_soft_pin_ttl(default_soft_pin_ttl)
+            .set_allow_evict_soft_pinned_objects(false)
+            .set_object_type_lease_policy(ObjectDataType::WEIGHT,
+                                          weight_policy)
+            .build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+    const UUID client_id = generate_uuid();
+
+    constexpr size_t buffer = 0x300000000;
+    constexpr size_t segment_size = 1024 * 1024 * 16;
+    constexpr size_t value_size = 1024 * 1024;
+    [[maybe_unused]] const auto context =
+        PrepareSimpleSegment(*service_, "test_segment", buffer, segment_size);
+
+    PutCompletedObjectWithType(*service_, client_id, "soft_weight_key",
+                               ObjectDataType::WEIGHT,
+                               /*with_soft_pin=*/true);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    int failed_puts = 0;
+    for (int i = 0; i < 20; ++i) {
+        std::string key = "pressure_key" + std::to_string(i);
+        ReplicateConfig config;
+        config.replica_num = 1;
+        if (service_->PutStart(client_id, key, "default", value_size, config)
+                .has_value()) {
+            ASSERT_TRUE(
+                service_->PutEnd(client_id, key, "default", ReplicaType::MEMORY)
+                    .has_value());
+        } else {
+            ++failed_puts;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    ASSERT_GT(failed_puts, 0);
+
+    auto soft_result =
+        service_->GetReplicaList("soft_weight_key", "default");
+    ASSERT_TRUE(soft_result.has_value());
 }
 
 TEST_F(MasterServiceTest,

@@ -1439,6 +1439,8 @@ class MasterService {
         const std::string& tenant_id, QuotaEraseMode quota_mode,
         MetadataShardAccessorRW* shard);
     void RebuildGroupRoutingIndex();
+    uint64_t SelectLeaseTtl(const ObjectMetadata& metadata) const;
+    uint64_t SelectSoftPinTtl(const ObjectMetadata& metadata) const;
     void GrantLeaseForGroup(const TenantState& tenant_state,
                             const std::string& key,
                             const ObjectMetadata& metadata) const;
@@ -1533,6 +1535,8 @@ class MasterService {
     // Lease related members
     const uint64_t default_kv_lease_ttl_;     // in milliseconds
     const uint64_t default_kv_soft_pin_ttl_;  // in milliseconds
+    const std::unordered_map<ObjectDataType, ObjectTypeLeasePolicy>
+        object_type_lease_policies_;
     const bool allow_evict_soft_pinned_objects_;
 
     // Eviction related members
