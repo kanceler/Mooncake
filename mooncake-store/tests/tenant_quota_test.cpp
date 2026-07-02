@@ -120,6 +120,32 @@ TEST(TenantQuotaTableTest, ListSnapshotsSortedAndSkipsLazyEmptyTenants) {
     EXPECT_EQ(snapshots[1].tenant_id, "b");
 }
 
+TEST(TenantQuotaTableTest, TracksUsageByObjectType) {
+    TenantQuotaTable table;
+    ASSERT_TRUE(table.UpsertTenantPolicy("tenant-a", 1000).has_value());
+    table.RecomputeEffectiveQuotas(1000);
+
+    ASSERT_TRUE(table.Reserve("tenant-a", 100).has_value());
+    auto snapshot = Snapshot(table, "tenant-a");
+    EXPECT_TRUE(snapshot.object_type_usage.empty());
+
+    ASSERT_TRUE(
+        table.Commit("tenant-a", 100, ObjectDataType::WEIGHT).has_value());
+    ASSERT_TRUE(table.Reserve("tenant-a", 200).has_value());
+    snapshot = Snapshot(table, "tenant-a");
+    EXPECT_EQ(snapshot.used_bytes, 100);
+    EXPECT_EQ(snapshot.reserved_bytes, 200);
+    EXPECT_EQ(snapshot.object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
+              100);
+    EXPECT_FALSE(snapshot.object_type_usage.contains(ObjectDataType::KVCACHE));
+
+    ASSERT_TRUE(table.Abort("tenant-a", 200).has_value());
+    ASSERT_TRUE(
+        table.Release("tenant-a", 100, ObjectDataType::WEIGHT).has_value());
+    snapshot = Snapshot(table, "tenant-a");
+    EXPECT_TRUE(snapshot.object_type_usage.empty());
+}
+
 TEST(TenantQuotaTableTest, ExplicitTenantsReceiveRequestedWhenCapacityFits) {
     TenantQuotaTable table;
     ASSERT_TRUE(table.UpsertTenantPolicy("tenant-a", 100).has_value());

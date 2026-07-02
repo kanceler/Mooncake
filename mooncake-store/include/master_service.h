@@ -915,6 +915,8 @@ class MasterService {
         uint64_t reserved_quota_charge_bytes{0};
         uint64_t committed_quota_charge_bytes{0};
         uint64_t pending_replaced_quota_charge_bytes{0};
+        ObjectDataType pending_replaced_quota_charge_data_type{
+            ObjectDataType::UNKNOWN};
 
         void AddReplicas(std::vector<Replica>&& replicas) {
             replicas_.insert(replicas_.end(),
@@ -1415,13 +1417,15 @@ class MasterService {
                                        uint64_t incoming_quota_charge);
     tl::expected<void, ErrorCode> ReserveTenantQuota(
         const std::string& tenant_id, uint64_t bytes);
-    void CommitTenantQuota(const std::string& tenant_id, uint64_t bytes);
+    void CommitTenantQuota(const std::string& tenant_id, uint64_t bytes,
+                           ObjectDataType data_type);
     void AbortTenantQuota(const std::string& tenant_id, uint64_t bytes);
-    void ReleaseTenantQuota(const std::string& tenant_id, uint64_t bytes);
+    void ReleaseTenantQuota(const std::string& tenant_id, uint64_t bytes,
+                            ObjectDataType data_type);
     void ReleaseTenantQuotaPartial(const std::string& tenant_id,
-                                   uint64_t bytes);
+                                   uint64_t bytes, ObjectDataType data_type);
     void CommitAdditionalTenantQuota(const std::string& tenant_id,
-                                     uint64_t bytes);
+                                     uint64_t bytes, ObjectDataType data_type);
     void AbortReplicationTaskQuota(const std::string& tenant_id,
                                    const ReplicationTask& task);
     void IncrementTenantMetadataObjectCount(const std::string& tenant_id);
