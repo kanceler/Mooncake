@@ -130,7 +130,7 @@ bool HasExpectedReplicaAllocation(const ReplicateConfig& config,
 bool IsLazyEmptyTenantQuotaState(const TenantQuotaState& state) {
     return !state.has_explicit_policy && state.used_bytes == 0 &&
            state.reserved_bytes == 0 && state.committed_count == 0 &&
-           state.metadata_object_count == 0;
+           state.metadata_object_count == 0 && state.object_type_usage.empty();
 }
 
 void RefreshTenantQuotaOverQuota(TenantQuotaState& state) {
@@ -151,8 +151,47 @@ TenantQuotaSnapshot MakeTenantQuotaSnapshot(const std::string& tenant_id,
         .reserved_bytes = state.reserved_bytes,
         .committed_count = state.committed_count,
         .metadata_object_count = state.metadata_object_count,
+        .object_type_usage = state.object_type_usage,
         .has_explicit_policy = state.has_explicit_policy,
         .over_quota = state.over_quota};
+}
+
+void CleanupTypeUsageIfEmpty(TenantQuotaState* state, ObjectDataType data_type) {
+    auto it = state->object_type_usage.find(data_type);
+    if (it == state->object_type_usage.end()) {
+        return;
+    }
+    if (it->second.used_bytes == 0) {
+        state->object_type_usage.erase(it);
+    }
+}
+
+void AddTypeUsedBytes(TenantQuotaState* state, ObjectDataType data_type,
+                      uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    auto& type_state = state->object_type_usage[data_type];
+    type_state.used_bytes = SaturatingAdd(type_state.used_bytes, bytes);
+}
+
+void SubtractTypeUsedBytes(TenantQuotaState* state,
+                           const std::string& tenant_id,
+                           ObjectDataType data_type, uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    auto& type_state = state->object_type_usage[data_type];
+    if (type_state.used_bytes < bytes) {
+        LOG(WARNING) << "tenant object type used accounting mismatch tenant="
+                     << tenant_id << ", data_type=" << toString(data_type)
+                     << ", requested=" << bytes
+                     << ", available=" << type_state.used_bytes;
+        type_state.used_bytes = 0;
+    } else {
+        type_state.used_bytes -= bytes;
+    }
+    CleanupTypeUsageIfEmpty(state, data_type);
 }
 
 tl::expected<std::string, ErrorCode> GetGroupIdForKey(
@@ -1204,7 +1243,8 @@ tl::expected<void, ErrorCode> MasterService::ReserveTenantQuota(
 }
 
 void MasterService::CommitTenantQuota(const std::string& tenant_id,
-                                      uint64_t bytes) {
+                                      uint64_t bytes,
+                                      ObjectDataType data_type) {
     if (!enable_multi_tenants_ || bytes == 0) {
         return;
     }
@@ -1232,6 +1272,7 @@ void MasterService::CommitTenantQuota(const std::string& tenant_id,
     } else {
         state.used_bytes += bytes;
     }
+    AddTypeUsedBytes(&state, data_type, bytes);
     ++state.committed_count;
     RefreshTenantQuotaOverQuota(state);
 }
@@ -1275,7 +1316,8 @@ void MasterService::AbortTenantQuota(const std::string& tenant_id,
 }
 
 void MasterService::ReleaseTenantQuota(const std::string& tenant_id,
-                                       uint64_t bytes) {
+                                       uint64_t bytes,
+                                       ObjectDataType data_type) {
     if (!enable_multi_tenants_ || bytes == 0) {
         return;
     }
@@ -1300,6 +1342,7 @@ void MasterService::ReleaseTenantQuota(const std::string& tenant_id,
             return;
         }
         state.used_bytes -= bytes;
+        SubtractTypeUsedBytes(&state, normalized_tenant, data_type, bytes);
         if (state.committed_count > 0) {
             --state.committed_count;
         }
@@ -1316,7 +1359,8 @@ void MasterService::ReleaseTenantQuota(const std::string& tenant_id,
 }
 
 void MasterService::ReleaseTenantQuotaPartial(const std::string& tenant_id,
-                                              uint64_t bytes) {
+                                              uint64_t bytes,
+                                              ObjectDataType data_type) {
     if (!enable_multi_tenants_ || bytes == 0) {
         return;
     }
@@ -1338,11 +1382,13 @@ void MasterService::ReleaseTenantQuotaPartial(const std::string& tenant_id,
         return;
     }
     state.used_bytes -= bytes;
+    SubtractTypeUsedBytes(&state, normalized_tenant, data_type, bytes);
     RefreshTenantQuotaOverQuota(state);
 }
 
 void MasterService::CommitAdditionalTenantQuota(const std::string& tenant_id,
-                                                uint64_t bytes) {
+                                                uint64_t bytes,
+                                                ObjectDataType data_type) {
     if (!enable_multi_tenants_ || bytes == 0) {
         return;
     }
@@ -1370,6 +1416,7 @@ void MasterService::CommitAdditionalTenantQuota(const std::string& tenant_id,
     } else {
         state.used_bytes += bytes;
     }
+    AddTypeUsedBytes(&state, data_type, bytes);
     RefreshTenantQuotaOverQuota(state);
 }
 
@@ -1438,9 +1485,11 @@ void MasterService::ReleaseCommittedQuotaCharge(ObjectMetadata& metadata,
     const uint64_t release_bytes =
         std::min(bytes, metadata.committed_quota_charge_bytes);
     if (release_bytes == metadata.committed_quota_charge_bytes) {
-        ReleaseTenantQuota(metadata.tenant_id, release_bytes);
+        ReleaseTenantQuota(metadata.tenant_id, release_bytes,
+                           metadata.data_type);
     } else {
-        ReleaseTenantQuotaPartial(metadata.tenant_id, release_bytes);
+        ReleaseTenantQuotaPartial(metadata.tenant_id, release_bytes,
+                                  metadata.data_type);
     }
     metadata.committed_quota_charge_bytes -= release_bytes;
 }
@@ -1454,6 +1503,10 @@ void MasterService::RebuildTenantQuotaUsageFromMetadata() {
     std::unordered_map<std::string, uint64_t> used_by_tenant;
     std::unordered_map<std::string, uint64_t> committed_count_by_tenant;
     std::unordered_map<std::string, uint64_t> metadata_count_by_tenant;
+    std::unordered_map<
+        std::string,
+        std::unordered_map<ObjectDataType, TenantObjectTypeQuotaState>>
+        object_type_usage_by_tenant;
     for (size_t i = 0; i < kNumShards; ++i) {
         MetadataShardAccessorRW shard(this, i);
         for (auto& [tenant_id, tenant_state] : shard->tenants) {
@@ -1464,10 +1517,16 @@ void MasterService::RebuildTenantQuotaUsageFromMetadata() {
                 metadata.reserved_quota_charge_bytes = 0;
                 metadata.committed_quota_charge_bytes = charge;
                 metadata.pending_replaced_quota_charge_bytes = 0;
+                metadata.pending_replaced_quota_charge_data_type =
+                    ObjectDataType::UNKNOWN;
                 if (charge == 0) {
                     continue;
                 }
                 used_by_tenant[tenant_id] += charge;
+                auto& type_used =
+                    object_type_usage_by_tenant[tenant_id][metadata.data_type]
+                        .used_bytes;
+                type_used = SaturatingAdd(type_used, charge);
                 committed_count_by_tenant[tenant_id]++;
             }
         }
@@ -1481,6 +1540,7 @@ void MasterService::RebuildTenantQuotaUsageFromMetadata() {
             state.reserved_bytes = 0;
             state.committed_count = 0;
             state.metadata_object_count = 0;
+            state.object_type_usage.clear();
         }
     }
     for (const auto& tenant_id : metadata_tenants) {
@@ -1500,6 +1560,8 @@ void MasterService::RebuildTenantQuotaUsageFromMetadata() {
         state.used_bytes = used_by_tenant[tenant_id];
         state.committed_count = committed_count_by_tenant[tenant_id];
         state.metadata_object_count = metadata_count_by_tenant[tenant_id];
+        state.object_type_usage =
+            std::move(object_type_usage_by_tenant[tenant_id]);
         RefreshTenantQuotaOverQuota(state);
     }
     RecomputeTenantEffectiveQuotas();
@@ -1688,9 +1750,11 @@ MasterService::EraseMetadata(
         case QuotaEraseMode::kFull:
             AbortTenantQuota(tenant_id, metadata.reserved_quota_charge_bytes);
             ReleaseTenantQuota(tenant_id,
-                               metadata.committed_quota_charge_bytes);
+                               metadata.committed_quota_charge_bytes,
+                               metadata.data_type);
             ReleaseTenantQuota(tenant_id,
-                               metadata.pending_replaced_quota_charge_bytes);
+                               metadata.pending_replaced_quota_charge_bytes,
+                               metadata.pending_replaced_quota_charge_data_type);
             break;
         case QuotaEraseMode::kPreserveOld:
             AbortTenantQuota(tenant_id, metadata.reserved_quota_charge_bytes);
@@ -3034,13 +3098,17 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
             metadata.reserved_quota_charge_bytes > commit_charge
                 ? metadata.reserved_quota_charge_bytes - commit_charge
                 : 0;
-        CommitTenantQuota(object_id.tenant_id, commit_charge);
+        CommitTenantQuota(object_id.tenant_id, commit_charge,
+                          metadata.data_type);
         AbortTenantQuota(object_id.tenant_id, abort_charge);
         metadata.reserved_quota_charge_bytes = 0;
         metadata.committed_quota_charge_bytes = actual_charge;
         ReleaseTenantQuota(object_id.tenant_id,
-                           metadata.pending_replaced_quota_charge_bytes);
+                           metadata.pending_replaced_quota_charge_bytes,
+                           metadata.pending_replaced_quota_charge_data_type);
         metadata.pending_replaced_quota_charge_bytes = 0;
+        metadata.pending_replaced_quota_charge_data_type =
+            ObjectDataType::UNKNOWN;
     }
 
     if (enable_offload_ && !offload_on_evict_) {
@@ -3506,6 +3574,7 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                     metadata.committed_quota_charge_bytes != 0
                         ? metadata.committed_quota_charge_bytes
                         : CompletedMemoryQuotaCharge(metadata);
+                const ObjectDataType old_data_type = metadata.data_type;
                 auto old_replicas =
                     PopReplicasWithCacheTotalAccounting(metadata);
                 if (!old_replicas.empty()) {
@@ -3523,13 +3592,16 @@ auto MasterService::UpsertStart(const UUID& client_id, const std::string& key,
                     shard, client_id, key, slice_length, merged_config,
                     existing_group_id, object_id.tenant_id, now);
                 if (!allocate_result) {
-                    ReleaseTenantQuota(object_id.tenant_id, old_quota_charge);
+                    ReleaseTenantQuota(object_id.tenant_id, old_quota_charge,
+                                       old_data_type);
                     return allocate_result;
                 }
                 auto new_it = tenant_state.metadata.find(key);
                 if (new_it != tenant_state.metadata.end()) {
                     new_it->second.pending_replaced_quota_charge_bytes =
                         old_quota_charge;
+                    new_it->second.pending_replaced_quota_charge_data_type =
+                        old_data_type;
                 }
                 return allocate_result;
             }
@@ -3802,7 +3874,8 @@ tl::expected<CopyStartResponse, ErrorCode> MasterService::CopyStart(
         std::piecewise_construct, std::forward_as_tuple(key),
         std::forward_as_tuple(client_id, std::chrono::system_clock::now(),
                               ReplicationTask::Type::COPY, source->id(),
-                              std::move(replica_ids), reserved_quota_charge));
+                              std::move(replica_ids),
+                              reserved_quota_charge));
     if (!task_insert.second) {
         abort_reserved_quota();
         return tl::make_unexpected(ErrorCode::OBJECT_HAS_REPLICATION_TASK);
@@ -3902,7 +3975,8 @@ tl::expected<void, ErrorCode> MasterService::CopyEnd(
         std::min(completed_quota_charge, task.reserved_quota_charge_bytes);
     const uint64_t abort_charge =
         task.reserved_quota_charge_bytes - commit_charge;
-    CommitAdditionalTenantQuota(metadata.tenant_id, commit_charge);
+    CommitAdditionalTenantQuota(metadata.tenant_id, commit_charge,
+                                metadata.data_type);
     AbortTenantQuota(metadata.tenant_id, abort_charge);
     metadata.committed_quota_charge_bytes =
         SaturatingAdd(metadata.committed_quota_charge_bytes, commit_charge);
@@ -4082,7 +4156,8 @@ tl::expected<MoveStartResponse, ErrorCode> MasterService::MoveStart(
         std::piecewise_construct, std::forward_as_tuple(key),
         std::forward_as_tuple(client_id, std::chrono::system_clock::now(),
                               ReplicationTask::Type::MOVE, source->id(),
-                              std::move(replica_ids), reserved_quota_charge));
+                              std::move(replica_ids),
+                              reserved_quota_charge));
     if (!task_insert.second) {
         AbortTenantQuota(object_id.tenant_id, reserved_quota_charge);
         return tl::make_unexpected(ErrorCode::OBJECT_HAS_REPLICATION_TASK);
@@ -5304,7 +5379,8 @@ auto MasterService::NotifyPromotionSuccess(const UUID& client_id,
             reserved_quota_charge > commit_charge
                 ? reserved_quota_charge - commit_charge
                 : 0;
-        CommitTenantQuota(object_id.tenant_id, commit_charge);
+        CommitTenantQuota(object_id.tenant_id, commit_charge,
+                          metadata.data_type);
         AbortTenantQuota(object_id.tenant_id, abort_charge);
         metadata.committed_quota_charge_bytes = actual_charge;
     } else {
