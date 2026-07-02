@@ -54,6 +54,7 @@ struct MetadataStoragePlugin;
 namespace test {
 class MasterServiceSnapshotTestBase;
 class SnapshotChildProcessTest;
+class MasterServiceObjectTypeEvictionTest;
 // Friended so the promotion-on-hit tests can drive a serialize/reset/
 // deserialize cycle directly via the otherwise-private
 // MetadataSerializer, and inspect private clamp fields. This avoids
@@ -81,6 +82,7 @@ class MasterService {
     // Test friend class for snapshot/restore testing
     friend class test::MasterServiceSnapshotTestBase;
     friend class test::SnapshotChildProcessTest;
+    friend class test::MasterServiceObjectTypeEvictionTest;
     friend class test::PromotionOnHitTest;
     friend class test::MasterServiceTenantQuotaTest;
 
@@ -1552,6 +1554,8 @@ class MasterService {
     const double eviction_high_watermark_ratio_;      // in range [0.0, 1.0]
     const double nof_eviction_ratio_;                 // in range [0.0, 1.0]
     const double nof_eviction_high_watermark_ratio_;  // in range [0.0, 1.0]
+    const std::unordered_map<ObjectDataType, ObjectTypeEvictionPolicy>
+        object_type_eviction_policies_;
 
     // Eviction thread related members
     std::thread eviction_thread_;

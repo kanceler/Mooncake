@@ -22,6 +22,7 @@
 
 #include <unistd.h>
 
+#include "master_metric_manager.h"
 #include "tenant_quota_policy_store.h"
 #include "types.h"
 
@@ -293,6 +294,122 @@ class MasterServiceTest : public ::testing::Test {
         google::ShutdownGoogleLogging();
     }
 };
+
+class MasterServiceObjectTypeEvictionTest : public MasterServiceTest {
+   protected:
+    void RunBatchEvict(MasterService& service, double evict_ratio_target,
+                       double evict_ratio_lowerbound) const {
+        service.BatchEvict(evict_ratio_target, evict_ratio_lowerbound);
+    }
+
+    MasterService::TenantQuotaEvictionResult RunTenantEvict(
+        MasterService& service, const std::string& tenant_id,
+        uint64_t target_bytes) const {
+        return service.EvictTenantMemoryForQuota(tenant_id, target_bytes);
+    }
+
+    size_t CountExisting(MasterService& service,
+                         const std::vector<std::string>& keys,
+                         const std::string& tenant_id = "default") const {
+        size_t count = 0;
+        for (const auto& key : keys) {
+            if (service.GetReplicaList(key, tenant_id).has_value()) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    std::vector<std::string> PutTypedObjects(
+        MasterService& service, const UUID& client_id,
+        const std::string& prefix, int count, ObjectDataType data_type,
+        uint64_t object_size = 1024,
+        const std::string& tenant_id = "default") const {
+        std::vector<std::string> keys;
+        keys.reserve(count);
+        ReplicateConfig config;
+        config.replica_num = 1;
+        config.data_type = data_type;
+        for (int i = 0; i < count; ++i) {
+            const std::string key = prefix + std::to_string(i);
+            PutCompletedObject(service, client_id, key, tenant_id, config,
+                               object_size);
+            keys.push_back(key);
+        }
+        return keys;
+    }
+};
+
+TEST_F(MasterServiceObjectTypeEvictionTest,
+       GlobalEvictionUsesTypeBudgetCorrectionBeforeFallback) {
+    MasterMetricManager::instance().reset_allocated_mem_size();
+    MasterMetricManager::instance().reset_total_mem_capacity();
+
+    ObjectTypeEvictionPolicy weight_policy;
+    weight_policy.budget_ratio = 0.25;
+    auto service_config = MasterServiceConfig::builder()
+                              .set_default_kv_lease_ttl(0)
+                              .set_object_type_eviction_policy(
+                                  ObjectDataType::WEIGHT, weight_policy)
+                              .build();
+    MasterService service(service_config);
+    const auto context = PrepareSimpleSegment(
+        service, "object_type_eviction_segment", kDefaultSegmentBase,
+        /*size=*/16 * 1024);
+
+    auto kv_keys = PutTypedObjects(service, context.client_id, "kv_old_", 4,
+                                   ObjectDataType::KVCACHE);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    auto weight_keys = PutTypedObjects(service, context.client_id, "weight_", 6,
+                                       ObjectDataType::WEIGHT);
+
+    RunBatchEvict(service, /*evict_ratio_target=*/0.5,
+                  /*evict_ratio_lowerbound=*/0.0);
+
+    EXPECT_EQ(CountExisting(service, kv_keys), 1);
+    EXPECT_EQ(CountExisting(service, weight_keys), 4);
+    service.RemoveAll();
+}
+
+TEST_F(MasterServiceObjectTypeEvictionTest,
+       TenantEvictionUsesTypeBudgetCorrectionBeforeFallback) {
+    MasterMetricManager::instance().reset_allocated_mem_size();
+    MasterMetricManager::instance().reset_total_mem_capacity();
+
+    const std::string tenant_id = "tenant_type_eviction";
+    ObjectTypeEvictionPolicy weight_policy;
+    weight_policy.budget_ratio = 0.4;
+
+    auto service_config = MasterServiceConfig::builder()
+                              .set_default_kv_lease_ttl(0)
+                              .set_enable_multi_tenants(true)
+                              .set_tenant_quota_connector_type("file")
+                              .set_tenant_quota_connector_uri(
+                                  WriteTenantPolicyFile({{tenant_id, 10240}}))
+                              .set_object_type_eviction_policy(
+                                  ObjectDataType::WEIGHT, weight_policy)
+                              .build();
+    MasterService service(service_config);
+    const auto context = PrepareSimpleSegment(
+        service, "tenant_object_type_eviction_segment", kDefaultSegmentBase,
+        /*size=*/16 * 1024);
+
+    auto kv_keys = PutTypedObjects(service, context.client_id, "tenant_kv_", 4,
+                                   ObjectDataType::KVCACHE,
+                                   /*object_size=*/1024, tenant_id);
+    auto weight_keys = PutTypedObjects(service, context.client_id,
+                                       "tenant_weight_", 6,
+                                       ObjectDataType::WEIGHT,
+                                       /*object_size=*/1024, tenant_id);
+
+    auto result = RunTenantEvict(service, tenant_id, /*target_bytes=*/2048);
+
+    EXPECT_EQ(result.freed_bytes, 2048);
+    EXPECT_EQ(result.evicted_objects, 2);
+    EXPECT_EQ(CountExisting(service, kv_keys, tenant_id), 4);
+    EXPECT_EQ(CountExisting(service, weight_keys, tenant_id), 4);
+    service.RemoveAll(tenant_id, /*force=*/true);
+}
 
 TEST(TenantScopedStorageKeyTest, RoundTripsAndParsesLegacyKeys) {
     const auto scoped =
