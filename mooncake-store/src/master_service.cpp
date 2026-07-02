@@ -187,6 +187,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
           }),
       default_kv_lease_ttl_(config.default_kv_lease_ttl),
       default_kv_soft_pin_ttl_(config.default_kv_soft_pin_ttl),
+      object_type_lease_policies_(config.object_type_lease_policies),
       allow_evict_soft_pinned_objects_(config.allow_evict_soft_pinned_objects),
       eviction_ratio_(config.eviction_ratio),
       eviction_high_watermark_ratio_(config.eviction_high_watermark_ratio),
@@ -1763,16 +1764,40 @@ void MasterService::RebuildGroupRoutingIndex() {
     }
 }
 
+uint64_t MasterService::SelectLeaseTtl(const ObjectMetadata& metadata) const {
+    auto it = object_type_lease_policies_.find(metadata.data_type);
+    if (it == object_type_lease_policies_.end()) {
+        return default_kv_lease_ttl_;
+    }
+
+    const auto& policy = it->second;
+    if (policy.soft_pinned_lease_ttl && metadata.IsSoftPinned()) {
+        return *policy.soft_pinned_lease_ttl;
+    }
+    return policy.lease_ttl.value_or(default_kv_lease_ttl_);
+}
+
+uint64_t MasterService::SelectSoftPinTtl(
+    const ObjectMetadata& metadata) const {
+    auto it = object_type_lease_policies_.find(metadata.data_type);
+    if (it == object_type_lease_policies_.end()) {
+        return default_kv_soft_pin_ttl_;
+    }
+
+    return it->second.soft_pin_ttl.value_or(default_kv_soft_pin_ttl_);
+}
+
 void MasterService::GrantLeaseForGroup(const TenantState& tenant_state,
                                        const std::string& key,
                                        const ObjectMetadata& metadata) const {
     if (!metadata.IsGrouped()) {
-        metadata.GrantLease(default_kv_lease_ttl_, default_kv_soft_pin_ttl_);
+        metadata.GrantLease(SelectLeaseTtl(metadata),
+                            SelectSoftPinTtl(metadata));
         return;
     }
 
-    bool needs_refresh = metadata.NeedsLeaseRefresh(default_kv_lease_ttl_,
-                                                    default_kv_soft_pin_ttl_);
+    bool needs_refresh = metadata.NeedsLeaseRefresh(SelectLeaseTtl(metadata),
+                                                    SelectSoftPinTtl(metadata));
     if (!needs_refresh) {
         std::shared_lock<std::shared_mutex> lock(group_routing_mutex_);
         needs_refresh = groups_needing_lease_refresh_.find(MakeTenantScopedKey(
@@ -1785,19 +1810,21 @@ void MasterService::GrantLeaseForGroup(const TenantState& tenant_state,
 
     auto group_it = tenant_state.group_members.find(metadata.group_id);
     if (group_it == tenant_state.group_members.end()) {
-        metadata.GrantLease(default_kv_lease_ttl_, default_kv_soft_pin_ttl_);
+        metadata.GrantLease(SelectLeaseTtl(metadata),
+                            SelectSoftPinTtl(metadata));
         return;
     }
 
     for (const auto& member_key : group_it->second) {
         auto mit = tenant_state.metadata.find(member_key);
         if (mit != tenant_state.metadata.end()) {
-            mit->second.GrantLease(default_kv_lease_ttl_,
-                                   default_kv_soft_pin_ttl_);
+            mit->second.GrantLease(SelectLeaseTtl(mit->second),
+                                   SelectSoftPinTtl(mit->second));
         }
     }
     if (group_it->second.find(key) == group_it->second.end()) {
-        metadata.GrantLease(default_kv_lease_ttl_, default_kv_soft_pin_ttl_);
+        metadata.GrantLease(SelectLeaseTtl(metadata),
+                            SelectSoftPinTtl(metadata));
     }
     {
         std::unique_lock<std::shared_mutex> lock(group_routing_mutex_);
@@ -2010,8 +2037,8 @@ auto MasterService::ExistKey(const std::string& key,
         if (ts) {
             GrantLeaseForGroup(*ts, key, metadata);
         } else {
-            metadata.GrantLease(default_kv_lease_ttl_,
-                                default_kv_soft_pin_ttl_);
+            metadata.GrantLease(SelectLeaseTtl(metadata),
+                                SelectSoftPinTtl(metadata));
         }
         return true;
     }
@@ -2478,8 +2505,8 @@ auto MasterService::GetReplicaList(const std::string& key,
         if (ts) {
             GrantLeaseForGroup(*ts, key, metadata);
         } else {
-            metadata.GrantLease(default_kv_lease_ttl_,
-                                default_kv_soft_pin_ttl_);
+            metadata.GrantLease(SelectLeaseTtl(metadata),
+                                SelectSoftPinTtl(metadata));
         }
 
         // Promotion-on-hit eligibility: only when no MEMORY replica is
@@ -2495,7 +2522,7 @@ auto MasterService::GetReplicaList(const std::string& key,
         }
 
         resp = GetReplicaListResponse(std::move(replica_list),
-                                      default_kv_lease_ttl_);
+                                      SelectLeaseTtl(metadata));
     }
     // RO accessor released. Safe to take a fresh RW accessor now.
     if (promotion_eligible) {
@@ -2608,7 +2635,7 @@ MasterService::BatchGetReplicaList(const std::vector<std::string>& keys,
                 }
 
                 results[original_idx] = GetReplicaListResponse(
-                    std::move(replica_list), default_kv_lease_ttl_);
+                    std::move(replica_list), SelectLeaseTtl(metadata));
             }
         }
 
@@ -3072,7 +3099,7 @@ auto MasterService::PutEnd(const UUID& client_id, const std::string& key,
     // 1. Set lease timeout to now, indicating that the object has no lease
     // at beginning. 2. If this object has soft pin enabled, set it to be soft
     // pinned.
-    metadata.GrantLease(0, default_kv_soft_pin_ttl_);
+    metadata.GrantLease(0, SelectSoftPinTtl(metadata));
     return {};
 }
 
