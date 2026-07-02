@@ -9,6 +9,7 @@
 #include <memory>   // For std::unique_ptr
 #include <string>
 #include <thread>  // For std::thread
+#include <unordered_map>
 #include <json/json.h>
 #include <ylt/coro_rpc/coro_rpc_server.hpp>
 #include <ylt/easylog/record.hpp>
@@ -62,6 +63,33 @@ uint64_t ParseDurationFlagOrDie(const char* flag_name,
                    << ". " << error;
     }
     return parsed_value;
+}
+
+bool ValidateObjectTypeLeasePoliciesFlag(const char* flagname,
+                                         const std::string& value) {
+    std::unordered_map<mooncake::ObjectDataType,
+                       mooncake::ObjectTypeLeasePolicy>
+        policies;
+    std::string error;
+    if (!mooncake::ParseObjectTypeLeasePoliciesFlag(value, &policies, &error)) {
+        LOG(ERROR) << "Invalid value for --" << flagname << ": " << error;
+        return false;
+    }
+    return true;
+}
+
+bool ValidateObjectTypeEvictionPoliciesFlag(const char* flagname,
+                                            const std::string& value) {
+    std::unordered_map<mooncake::ObjectDataType,
+                       mooncake::ObjectTypeEvictionPolicy>
+        policies;
+    std::string error;
+    if (!mooncake::ParseObjectTypeEvictionPoliciesFlag(value, &policies,
+                                                       &error)) {
+        LOG(ERROR) << "Invalid value for --" << flagname << ": " << error;
+        return false;
+    }
+    return true;
 }
 
 // Derive the metadata server address for cleanup when it is deployed
@@ -124,11 +152,22 @@ DEFINE_string(default_kv_lease_ttl, kDefaultKvLeaseTtlFlagValue,
 DEFINE_string(default_kv_soft_pin_ttl, kDefaultKvSoftPinTtlFlagValue,
               "Default soft pin TTL for kv objects. Supports raw milliseconds "
               "or duration strings with ms, s, m, or h suffixes");
+DEFINE_string(object_type_lease_policies, "",
+              "Semicolon-separated per-object-type lease policies. Example: "
+              "HIDDEN_STATE:lease_ttl=10s,soft_pinned_lease_ttl=20s,"
+              "soft_pin_ttl=60s");
+DEFINE_string(object_type_eviction_policies, "",
+              "Semicolon-separated per-object-type eviction policies. Example: "
+              "HIDDEN_STATE:budget_ratio=0.08");
 DEFINE_bool(allow_evict_soft_pinned_objects,
             mooncake::DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS,
             "Whether to allow eviction of soft pinned objects during eviction");
 DEFINE_validator(default_kv_lease_ttl, ValidateDurationFlag);
 DEFINE_validator(default_kv_soft_pin_ttl, ValidateDurationFlag);
+DEFINE_validator(object_type_lease_policies,
+                 ValidateObjectTypeLeasePoliciesFlag);
+DEFINE_validator(object_type_eviction_policies,
+                 ValidateObjectTypeEvictionPoliciesFlag);
 DEFINE_double(eviction_ratio, mooncake::DEFAULT_EVICTION_RATIO,
               "Ratio of objects to evict when Memory space is full");
 DEFINE_double(eviction_high_watermark_ratio,
@@ -427,6 +466,32 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
     default_config.GetBool("allow_evict_soft_pinned_objects",
                            &master_config.allow_evict_soft_pinned_objects,
                            FLAGS_allow_evict_soft_pinned_objects);
+    std::string object_type_lease_policies;
+    default_config.GetString("object_type_lease_policies",
+                             &object_type_lease_policies,
+                             FLAGS_object_type_lease_policies);
+    {
+        std::string error;
+        if (!mooncake::ParseObjectTypeLeasePoliciesFlag(
+                object_type_lease_policies,
+                &master_config.object_type_lease_policies, &error)) {
+            LOG(FATAL) << "Invalid value for object_type_lease_policies: "
+                       << error;
+        }
+    }
+    std::string object_type_eviction_policies;
+    default_config.GetString("object_type_eviction_policies",
+                             &object_type_eviction_policies,
+                             FLAGS_object_type_eviction_policies);
+    {
+        std::string error;
+        if (!mooncake::ParseObjectTypeEvictionPoliciesFlag(
+                object_type_eviction_policies,
+                &master_config.object_type_eviction_policies, &error)) {
+            LOG(FATAL) << "Invalid value for object_type_eviction_policies: "
+                       << error;
+        }
+    }
     default_config.GetDouble("eviction_ratio", &master_config.eviction_ratio,
                              FLAGS_eviction_ratio);
     default_config.GetDouble("eviction_high_watermark_ratio",
@@ -716,6 +781,29 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.allow_evict_soft_pinned_objects =
             FLAGS_allow_evict_soft_pinned_objects;
+    }
+    if ((google::GetCommandLineFlagInfo("object_type_lease_policies", &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        std::string error;
+        if (!mooncake::ParseObjectTypeLeasePoliciesFlag(
+                FLAGS_object_type_lease_policies,
+                &master_config.object_type_lease_policies, &error)) {
+            LOG(FATAL) << "Invalid value for --object_type_lease_policies: "
+                       << error;
+        }
+    }
+    if ((google::GetCommandLineFlagInfo("object_type_eviction_policies",
+                                        &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        std::string error;
+        if (!mooncake::ParseObjectTypeEvictionPoliciesFlag(
+                FLAGS_object_type_eviction_policies,
+                &master_config.object_type_eviction_policies, &error)) {
+            LOG(FATAL) << "Invalid value for --object_type_eviction_policies: "
+                       << error;
+        }
     }
     if ((google::GetCommandLineFlagInfo("eviction_ratio", &info) &&
          !info.is_default) ||

@@ -1,13 +1,18 @@
 #pragma once
 
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 
 #include <glog/logging.h>
 
 #include "config_helper.h"
+#include "duration_utils.h"
 #include "types.h"
 
 namespace mooncake {
@@ -30,6 +35,255 @@ struct ObjectTypeEvictionPolicy {
     // global or tenant-local eviction has already been triggered.
     double budget_ratio = 0.0;
 };
+
+inline std::string_view TrimPolicyToken(std::string_view value) {
+    while (!value.empty() &&
+           (value.front() == ' ' || value.front() == '\t' ||
+            value.front() == '\n' || value.front() == '\r')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() &&
+           (value.back() == ' ' || value.back() == '\t' ||
+            value.back() == '\n' || value.back() == '\r')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+inline bool ParseObjectTypePolicyHeader(std::string_view entry,
+                                        ObjectDataType* data_type,
+                                        std::string_view* body,
+                                        std::string* error) {
+    auto colon_pos = entry.find(':');
+    if (colon_pos == std::string_view::npos) {
+        if (error) {
+            *error = "missing ':' separator in object type policy entry";
+        }
+        return false;
+    }
+
+    auto type_name = TrimPolicyToken(entry.substr(0, colon_pos));
+    auto parsed_type = ParseObjectDataType(type_name);
+    if (!parsed_type) {
+        if (error) {
+            *error = "unknown object data type: " + std::string(type_name);
+        }
+        return false;
+    }
+
+    *data_type = *parsed_type;
+    *body = TrimPolicyToken(entry.substr(colon_pos + 1));
+    if (body->empty()) {
+        if (error) {
+            *error = "empty object type policy body";
+        }
+        return false;
+    }
+    return true;
+}
+
+inline bool ParsePolicyKeyValue(std::string_view field, std::string_view* key,
+                                std::string_view* value, std::string* error) {
+    auto equal_pos = field.find('=');
+    if (equal_pos == std::string_view::npos) {
+        if (error) {
+            *error = "missing '=' separator in object type policy field";
+        }
+        return false;
+    }
+
+    *key = TrimPolicyToken(field.substr(0, equal_pos));
+    *value = TrimPolicyToken(field.substr(equal_pos + 1));
+    if (key->empty() || value->empty()) {
+        if (error) {
+            *error = "empty key or value in object type policy field";
+        }
+        return false;
+    }
+    return true;
+}
+
+inline bool ParseObjectTypeLeasePolicyBody(std::string_view body,
+                                           ObjectTypeLeasePolicy* policy,
+                                           std::string* error) {
+    bool has_field = false;
+    size_t start = 0;
+    while (start <= body.size()) {
+        size_t end = body.find(',', start);
+        auto field = TrimPolicyToken(body.substr(
+            start, end == std::string_view::npos ? std::string_view::npos
+                                                 : end - start));
+        if (!field.empty()) {
+            std::string_view key;
+            std::string_view value;
+            if (!ParsePolicyKeyValue(field, &key, &value, error)) {
+                return false;
+            }
+
+            uint64_t parsed_duration = 0;
+            std::string duration_error;
+            if (!ParseDurationMs(std::string(value), &parsed_duration,
+                                 &duration_error)) {
+                if (error) {
+                    *error = "invalid duration for " + std::string(key) +
+                             ": " + duration_error;
+                }
+                return false;
+            }
+
+            if (key == "lease_ttl") {
+                policy->lease_ttl = parsed_duration;
+            } else if (key == "soft_pinned_lease_ttl") {
+                policy->soft_pinned_lease_ttl = parsed_duration;
+            } else if (key == "soft_pin_ttl") {
+                policy->soft_pin_ttl = parsed_duration;
+            } else {
+                if (error) {
+                    *error = "unknown lease policy key: " + std::string(key);
+                }
+                return false;
+            }
+            has_field = true;
+        }
+
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    if (!has_field) {
+        if (error) {
+            *error = "lease policy must contain at least one field";
+        }
+        return false;
+    }
+    return true;
+}
+
+inline bool ParseObjectTypeLeasePoliciesFlag(
+    std::string_view value,
+    std::unordered_map<ObjectDataType, ObjectTypeLeasePolicy>* policies,
+    std::string* error) {
+    if (!policies) {
+        if (error) {
+            *error = "output policy map is null";
+        }
+        return false;
+    }
+
+    policies->clear();
+    value = TrimPolicyToken(value);
+    if (value.empty()) {
+        return true;
+    }
+
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t end = value.find(';', start);
+        auto entry = TrimPolicyToken(value.substr(
+            start, end == std::string_view::npos ? std::string_view::npos
+                                                 : end - start));
+        if (!entry.empty()) {
+            ObjectDataType data_type;
+            std::string_view body;
+            ObjectTypeLeasePolicy policy;
+            if (!ParseObjectTypePolicyHeader(entry, &data_type, &body, error) ||
+                !ParseObjectTypeLeasePolicyBody(body, &policy, error)) {
+                return false;
+            }
+            if (policies->find(data_type) != policies->end()) {
+                if (error) {
+                    *error = "duplicate lease policy for object data type";
+                }
+                return false;
+            }
+            (*policies)[data_type] = policy;
+        }
+
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return true;
+}
+
+inline bool ParseObjectTypeEvictionPoliciesFlag(
+    std::string_view value,
+    std::unordered_map<ObjectDataType, ObjectTypeEvictionPolicy>* policies,
+    std::string* error) {
+    if (!policies) {
+        if (error) {
+            *error = "output policy map is null";
+        }
+        return false;
+    }
+
+    policies->clear();
+    value = TrimPolicyToken(value);
+    if (value.empty()) {
+        return true;
+    }
+
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t end = value.find(';', start);
+        auto entry = TrimPolicyToken(value.substr(
+            start, end == std::string_view::npos ? std::string_view::npos
+                                                 : end - start));
+        if (!entry.empty()) {
+            ObjectDataType data_type;
+            std::string_view body;
+            if (!ParseObjectTypePolicyHeader(entry, &data_type, &body, error)) {
+                return false;
+            }
+
+            std::string_view key;
+            std::string_view ratio_value;
+            if (!ParsePolicyKeyValue(body, &key, &ratio_value, error)) {
+                return false;
+            }
+            if (key != "budget_ratio") {
+                if (error) {
+                    *error = "unknown eviction policy key: " + std::string(key);
+                }
+                return false;
+            }
+
+            std::string ratio_string(ratio_value);
+            char* parse_end = nullptr;
+            errno = 0;
+            double budget_ratio =
+                std::strtod(ratio_string.c_str(), &parse_end);
+            if (errno != 0 || parse_end == ratio_string.c_str() ||
+                *parse_end != '\0' || !std::isfinite(budget_ratio) ||
+                budget_ratio < 0.0 || budget_ratio > 1.0) {
+                if (error) {
+                    *error = "budget_ratio must be a number between 0.0 and 1.0";
+                }
+                return false;
+            }
+
+            if (policies->find(data_type) != policies->end()) {
+                if (error) {
+                    *error = "duplicate eviction policy for object data type";
+                }
+                return false;
+            }
+
+            ObjectTypeEvictionPolicy policy;
+            policy.budget_ratio = budget_ratio;
+            (*policies)[data_type] = policy;
+        }
+
+        if (end == std::string_view::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return true;
+}
 
 inline std::string ResolveConfiguredHABackendConnstring(
     std::string_view ha_backend_type, std::string_view ha_backend_connstring,

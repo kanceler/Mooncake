@@ -1,4 +1,5 @@
 #include "types.h"
+#include "master_config.h"
 #include "replica.h"
 #include "master_service.h"
 
@@ -76,6 +77,87 @@ TEST_F(ObjectDataTypeTest, StreamOperator) {
     oss.str("");
     oss << static_cast<ObjectDataType>(200);
     EXPECT_EQ(oss.str(), "UNKNOWN");
+}
+
+TEST_F(ObjectDataTypeTest, ParseObjectDataTypeFromString) {
+    EXPECT_EQ(ParseObjectDataType("UNKNOWN"), ObjectDataType::UNKNOWN);
+    EXPECT_EQ(ParseObjectDataType("KVCACHE"), ObjectDataType::KVCACHE);
+    EXPECT_EQ(ParseObjectDataType("WEIGHT"), ObjectDataType::WEIGHT);
+    EXPECT_EQ(ParseObjectDataType("HIDDEN_STATE"), ObjectDataType::HIDDEN_STATE);
+
+    EXPECT_FALSE(ParseObjectDataType("hidden_state").has_value());
+    EXPECT_FALSE(ParseObjectDataType("NOT_A_TYPE").has_value());
+}
+
+TEST_F(ObjectDataTypeTest, ParseObjectTypeLeasePoliciesFlag) {
+    std::unordered_map<ObjectDataType, ObjectTypeLeasePolicy> policies;
+    std::string error;
+
+    ASSERT_TRUE(ParseObjectTypeLeasePoliciesFlag(
+        "HIDDEN_STATE:lease_ttl=10s,soft_pinned_lease_ttl=20s,"
+        "soft_pin_ttl=60s",
+        &policies, &error))
+        << error;
+
+    ASSERT_EQ(policies.size(), 1);
+    const auto& policy = policies.at(ObjectDataType::HIDDEN_STATE);
+    ASSERT_TRUE(policy.lease_ttl.has_value());
+    ASSERT_TRUE(policy.soft_pinned_lease_ttl.has_value());
+    ASSERT_TRUE(policy.soft_pin_ttl.has_value());
+    EXPECT_EQ(*policy.lease_ttl, 10'000);
+    EXPECT_EQ(*policy.soft_pinned_lease_ttl, 20'000);
+    EXPECT_EQ(*policy.soft_pin_ttl, 60'000);
+}
+
+TEST_F(ObjectDataTypeTest, ParseObjectTypeEvictionPoliciesFlag) {
+    std::unordered_map<ObjectDataType, ObjectTypeEvictionPolicy> policies;
+    std::string error;
+
+    ASSERT_TRUE(ParseObjectTypeEvictionPoliciesFlag(
+        "HIDDEN_STATE:budget_ratio=0.08", &policies, &error))
+        << error;
+
+    ASSERT_EQ(policies.size(), 1);
+    EXPECT_DOUBLE_EQ(policies.at(ObjectDataType::HIDDEN_STATE).budget_ratio,
+                     0.08);
+}
+
+TEST_F(ObjectDataTypeTest, ParseObjectTypePolicyFlagsRejectInvalidInput) {
+    std::unordered_map<ObjectDataType, ObjectTypeLeasePolicy> lease_policies;
+    std::unordered_map<ObjectDataType, ObjectTypeEvictionPolicy>
+        eviction_policies;
+    std::string error;
+
+    EXPECT_FALSE(ParseObjectTypeLeasePoliciesFlag(
+        "HIDDEN_STATE:lease_ttl=not_a_duration", &lease_policies, &error));
+    EXPECT_FALSE(error.empty());
+
+    error.clear();
+    EXPECT_FALSE(ParseObjectTypeEvictionPoliciesFlag(
+        "HIDDEN_STATE:budget_ratio=1.5", &eviction_policies, &error));
+    EXPECT_FALSE(error.empty());
+
+    error.clear();
+    EXPECT_FALSE(ParseObjectTypeEvictionPoliciesFlag(
+        "NOT_A_TYPE:budget_ratio=0.08", &eviction_policies, &error));
+    EXPECT_FALSE(error.empty());
+
+    error.clear();
+    EXPECT_FALSE(ParseObjectTypeLeasePoliciesFlag(
+        "WEIGHT:lease_ttl=10s;WEIGHT:lease_ttl=20s", &lease_policies,
+        &error));
+    EXPECT_FALSE(error.empty());
+
+    error.clear();
+    EXPECT_FALSE(ParseObjectTypeEvictionPoliciesFlag(
+        "WEIGHT:budget_ratio=nan", &eviction_policies, &error));
+    EXPECT_FALSE(error.empty());
+
+    error.clear();
+    EXPECT_FALSE(ParseObjectTypeEvictionPoliciesFlag(
+        "WEIGHT:budget_ratio=0.1;WEIGHT:budget_ratio=0.2",
+        &eviction_policies, &error));
+    EXPECT_FALSE(error.empty());
 }
 
 // ReplicateConfig defaults to UNKNOWN

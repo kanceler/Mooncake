@@ -171,6 +171,29 @@ inline std::ostream& operator<<(std::ostream& os,
     return os;
 }
 
+inline std::optional<ObjectDataType> ParseObjectDataType(
+    std::string_view value) noexcept {
+    static const std::unordered_map<std::string_view, ObjectDataType> types{
+        {"UNKNOWN", ObjectDataType::UNKNOWN},
+        {"KVCACHE", ObjectDataType::KVCACHE},
+        {"TENSOR", ObjectDataType::TENSOR},
+        {"WEIGHT", ObjectDataType::WEIGHT},
+        {"SAMPLE", ObjectDataType::SAMPLE},
+        {"ACTIVATION", ObjectDataType::ACTIVATION},
+        {"GRADIENT", ObjectDataType::GRADIENT},
+        {"OPTIMIZER_STATE", ObjectDataType::OPTIMIZER_STATE},
+        {"METADATA", ObjectDataType::METADATA},
+        {"GENERAL", ObjectDataType::GENERAL},
+        {"HIDDEN_STATE", ObjectDataType::HIDDEN_STATE},
+    };
+
+    auto it = types.find(value);
+    if (it == types.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
 // Forward declarations
 class BufferAllocatorBase;
 class CachelibBufferAllocator;
