@@ -4546,6 +4546,70 @@ TEST_F(MasterServiceTest, BatchExistKeyTenantAwarePreservesOrder) {
     EXPECT_TRUE(default_resp[1].value());
 }
 
+TEST_F(MasterServiceTest, TenantQuotaSnapshotBreaksDownUsageByObjectType) {
+    const std::string tenant_id = "tenant_type_quota_accounting";
+    auto service_ = std::make_unique<MasterService>(
+        MakeStrictTenantConfig({"default", tenant_id}));
+    const UUID client_id = generate_uuid();
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(*service_);
+
+    ReplicateConfig weight_config;
+    weight_config.replica_num = 1;
+    weight_config.data_type = ObjectDataType::WEIGHT;
+
+    ASSERT_TRUE(service_
+                    ->PutStart(client_id, "weight_key", tenant_id,
+                               /*slice_length=*/1024, weight_config)
+                    .has_value());
+    auto snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->reserved_bytes, 1024);
+    EXPECT_TRUE(snapshot->object_type_usage.empty());
+
+    ASSERT_TRUE(
+        service_->PutEnd(client_id, "weight_key", tenant_id,
+                         ReplicaType::MEMORY)
+            .has_value());
+    snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->used_bytes, 1024);
+    EXPECT_EQ(snapshot->reserved_bytes, 0);
+    EXPECT_EQ(
+        snapshot->object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
+        1024);
+
+    ReplicateConfig kv_config;
+    kv_config.replica_num = 1;
+    kv_config.data_type = ObjectDataType::KVCACHE;
+    ASSERT_TRUE(service_
+                    ->PutStart(client_id, "kv_key", tenant_id,
+                               /*slice_length=*/2048, kv_config)
+                    .has_value());
+    ASSERT_TRUE(
+        service_->PutEnd(client_id, "kv_key", tenant_id, ReplicaType::MEMORY)
+            .has_value());
+
+    snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_EQ(snapshot->used_bytes, 3072);
+    EXPECT_EQ(
+        snapshot->object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
+        1024);
+    EXPECT_EQ(
+        snapshot->object_type_usage.at(ObjectDataType::KVCACHE).used_bytes,
+        2048);
+
+    ASSERT_TRUE(
+        service_->Remove("weight_key", tenant_id, /*force=*/true).has_value());
+    snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_FALSE(
+        snapshot->object_type_usage.contains(ObjectDataType::WEIGHT));
+    EXPECT_EQ(
+        snapshot->object_type_usage.at(ObjectDataType::KVCACHE).used_bytes,
+        2048);
+}
+
 TEST_F(MasterServiceTest, WrappedBatchExistKeyUsesTenantAwareBatchPath) {
     const std::string tenant_id = "wrapped_batch_exist_tenant";
     auto service_config = MakeStrictWrappedConfig({"default", tenant_id});

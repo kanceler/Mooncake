@@ -26,7 +26,7 @@ uint64_t SaturatingAdd(uint64_t lhs, uint64_t rhs) {
 bool IsLazyEmptyTenant(const TenantQuotaState& state) {
     return !state.has_explicit_policy && state.used_bytes == 0 &&
            state.reserved_bytes == 0 && state.committed_count == 0 &&
-           state.metadata_object_count == 0;
+           state.metadata_object_count == 0 && state.object_type_usage.empty();
 }
 
 TenantQuotaResult AccountingMismatch(const char* operation,
@@ -35,6 +35,44 @@ TenantQuotaResult AccountingMismatch(const char* operation,
     LOG(WARNING) << operation << " accounting mismatch for tenant " << tenant_id
                  << ": requested=" << requested << ", available=" << available;
     return tl::make_unexpected(TenantQuotaError::kAccountingMismatch);
+}
+
+void CleanupTypeUsageIfEmpty(TenantQuotaState* state, ObjectDataType data_type) {
+    auto it = state->object_type_usage.find(data_type);
+    if (it == state->object_type_usage.end()) {
+        return;
+    }
+    if (it->second.used_bytes == 0) {
+        state->object_type_usage.erase(it);
+    }
+}
+
+void AddTypeUsedBytes(TenantQuotaState* state, ObjectDataType data_type,
+                      uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    auto& type_state = state->object_type_usage[data_type];
+    type_state.used_bytes = SaturatingAdd(type_state.used_bytes, bytes);
+}
+
+void SubtractTypeUsedBytes(TenantQuotaState* state,
+                           const std::string& tenant_id,
+                           ObjectDataType data_type, uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    auto& type_state = state->object_type_usage[data_type];
+    if (type_state.used_bytes < bytes) {
+        LOG(WARNING) << "tenant object type used accounting mismatch tenant="
+                     << tenant_id << ", data_type=" << toString(data_type)
+                     << ", requested=" << bytes
+                     << ", available=" << type_state.used_bytes;
+        type_state.used_bytes = 0;
+    } else {
+        type_state.used_bytes -= bytes;
+    }
+    CleanupTypeUsageIfEmpty(state, data_type);
 }
 
 }  // namespace
@@ -208,7 +246,8 @@ TenantQuotaResult TenantQuotaTable::Reserve(std::string tenant_id,
 }
 
 TenantQuotaResult TenantQuotaTable::Commit(std::string tenant_id,
-                                           uint64_t bytes) {
+                                           uint64_t bytes,
+                                           ObjectDataType data_type) {
     auto normalized_tenant_id = NormalizeTenantId(std::move(tenant_id));
     auto& state = GetOrCreateState(normalized_tenant_id);
     if (bytes == 0) {
@@ -222,6 +261,7 @@ TenantQuotaResult TenantQuotaTable::Commit(std::string tenant_id,
 
     state.reserved_bytes -= bytes;
     state.used_bytes = SaturatingAdd(state.used_bytes, bytes);
+    AddTypeUsedBytes(&state, data_type, bytes);
     ++state.committed_count;
     RefreshOverQuota(&state);
     return {};
@@ -246,7 +286,8 @@ TenantQuotaResult TenantQuotaTable::Abort(std::string tenant_id,
 }
 
 TenantQuotaResult TenantQuotaTable::Release(std::string tenant_id,
-                                            uint64_t bytes) {
+                                            uint64_t bytes,
+                                            ObjectDataType data_type) {
     auto normalized_tenant_id = NormalizeTenantId(std::move(tenant_id));
     auto& state = GetOrCreateState(normalized_tenant_id);
     if (bytes == 0) {
@@ -259,6 +300,7 @@ TenantQuotaResult TenantQuotaTable::Release(std::string tenant_id,
     }
 
     state.used_bytes -= bytes;
+    SubtractTypeUsedBytes(&state, normalized_tenant_id, data_type, bytes);
     if (state.committed_count > 0) {
         --state.committed_count;
     } else {
@@ -270,7 +312,8 @@ TenantQuotaResult TenantQuotaTable::Release(std::string tenant_id,
 }
 
 TenantQuotaResult TenantQuotaTable::ReleasePartial(std::string tenant_id,
-                                                   uint64_t bytes) {
+                                                   uint64_t bytes,
+                                                   ObjectDataType data_type) {
     auto normalized_tenant_id = NormalizeTenantId(std::move(tenant_id));
     auto& state = GetOrCreateState(normalized_tenant_id);
     if (bytes == 0) {
@@ -284,6 +327,7 @@ TenantQuotaResult TenantQuotaTable::ReleasePartial(std::string tenant_id,
     }
 
     state.used_bytes -= bytes;
+    SubtractTypeUsedBytes(&state, normalized_tenant_id, data_type, bytes);
     RefreshOverQuota(&state);
     return {};
 }
@@ -308,6 +352,7 @@ TenantQuotaSnapshot TenantQuotaTable::MakeSnapshot(
         .reserved_bytes = state.reserved_bytes,
         .committed_count = state.committed_count,
         .metadata_object_count = state.metadata_object_count,
+        .object_type_usage = state.object_type_usage,
         .has_explicit_policy = state.has_explicit_policy,
         .over_quota = state.over_quota,
     };

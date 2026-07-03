@@ -4,11 +4,18 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <ylt/util/tl/expected.hpp>
 
+#include "types.h"
+
 namespace mooncake {
+
+struct TenantObjectTypeQuotaState {
+    uint64_t used_bytes = 0;
+};
 
 struct TenantQuotaState {
     uint64_t requested_quota_bytes = 0;
@@ -17,6 +24,8 @@ struct TenantQuotaState {
     uint64_t reserved_bytes = 0;
     uint64_t committed_count = 0;
     uint64_t metadata_object_count = 0;
+    std::unordered_map<ObjectDataType, TenantObjectTypeQuotaState>
+        object_type_usage;
     bool has_explicit_policy = false;
     bool over_quota = false;
 };
@@ -29,6 +38,8 @@ struct TenantQuotaSnapshot {
     uint64_t reserved_bytes = 0;
     uint64_t committed_count = 0;
     uint64_t metadata_object_count = 0;
+    std::unordered_map<ObjectDataType, TenantObjectTypeQuotaState>
+        object_type_usage;
     bool has_explicit_policy = false;
     bool over_quota = false;
 };
@@ -63,10 +74,13 @@ class TenantQuotaTable {
     std::vector<TenantQuotaSnapshot> ListTenantSnapshots() const;
 
     TenantQuotaResult Reserve(std::string tenant_id, uint64_t bytes);
-    TenantQuotaResult Commit(std::string tenant_id, uint64_t bytes);
+    TenantQuotaResult Commit(std::string tenant_id, uint64_t bytes,
+                             ObjectDataType data_type);
     TenantQuotaResult Abort(std::string tenant_id, uint64_t bytes);
-    TenantQuotaResult Release(std::string tenant_id, uint64_t bytes);
-    TenantQuotaResult ReleasePartial(std::string tenant_id, uint64_t bytes);
+    TenantQuotaResult Release(std::string tenant_id, uint64_t bytes,
+                              ObjectDataType data_type);
+    TenantQuotaResult ReleasePartial(std::string tenant_id, uint64_t bytes,
+                                     ObjectDataType data_type);
 
    private:
     TenantQuotaState& GetOrCreateState(const std::string& tenant_id);
