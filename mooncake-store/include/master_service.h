@@ -815,7 +815,8 @@ class MasterService {
     // allow_evict_soft_pinned_objects_ is true. The first pass tries fulfill
     // evict ratio target. If the actual evicted ratio is less than
     // evict_ratio_lowerbound, the second pass will be triggered and try to
-    // fulfill evict ratio lowerbound.
+    // fulfill evict ratio lowerbound. Object type score policies normalize the
+    // near-LRU rank but do not change lease eligibility.
     void BatchEvict(double evict_ratio_target, double evict_ratio_lowerbound);
     void NoFBatchEvict(double evict_ratio_target,
                        double evict_ratio_lowerbound);
@@ -1534,6 +1535,8 @@ class MasterService {
     const uint64_t default_kv_lease_ttl_;     // in milliseconds
     const uint64_t default_kv_soft_pin_ttl_;  // in milliseconds
     const bool allow_evict_soft_pinned_objects_;
+    const std::unordered_map<ObjectDataType, ObjectTypeEvictionScorePolicy>
+        object_type_eviction_score_policies_;
 
     // Eviction related members
     std::atomic<bool> need_mem_eviction_{

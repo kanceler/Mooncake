@@ -177,6 +177,17 @@ class MasterServiceTest : public ::testing::Test {
                 .has_value());
     }
 
+    void PutCompletedObjectWithType(MasterService& service,
+                                    const UUID& client_id,
+                                    const std::string& key,
+                                    ObjectDataType data_type,
+                                    uint64_t slice_length = 1024) const {
+        ReplicateConfig config;
+        config.replica_num = 1;
+        config.data_type = data_type;
+        PutCompletedObject(service, client_id, key, config, slice_length);
+    }
+
     void PutCompletedObject(MasterService& service, const UUID& client_id,
                             const std::string& key,
                             const std::string& tenant_id,
@@ -4031,6 +4042,57 @@ TEST_F(MasterServiceTest, TryEvictLeasedObject) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(kv_lease_ttl));
     service_->RemoveAll();
+}
+
+TEST_F(MasterServiceTest, ObjectTypeEvictionScorePolicyRanksByReuseScale) {
+    ObjectTypeEvictionScorePolicy weight_policy;
+    weight_policy.reuse_scale = 1000.0;
+    weight_policy.soft_pin_weight = 1.0;
+    ObjectTypeEvictionScorePolicy kv_policy;
+    kv_policy.reuse_scale = 1.0;
+    kv_policy.soft_pin_weight = -1.0;
+
+    auto service_config =
+        MasterServiceConfig::builder()
+            .set_default_kv_lease_ttl(0)
+            .set_eviction_ratio(0.5)
+            .set_eviction_high_watermark_ratio(1.0)
+            .set_object_type_eviction_score_policy(ObjectDataType::WEIGHT,
+                                                   weight_policy)
+            .set_object_type_eviction_score_policy(ObjectDataType::KVCACHE,
+                                                   kv_policy)
+            .build();
+    std::unique_ptr<MasterService> service(new MasterService(service_config));
+    constexpr size_t object_size = 1024 * 1024;
+    [[maybe_unused]] const auto context =
+        PrepareSimpleSegment(*service, "test_segment", 0x300000000,
+                             object_size * 2 + object_size / 2);
+    const UUID client_id = generate_uuid();
+
+    PutCompletedObjectWithType(*service, client_id, "weight_key",
+                               ObjectDataType::WEIGHT, object_size);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    PutCompletedObjectWithType(*service, client_id, "kv_key",
+                               ObjectDataType::KVCACHE, object_size);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    ReplicateConfig pressure_config;
+    pressure_config.replica_num = 1;
+    auto pressure_result =
+        service->PutStart(client_id, "pressure_key", "default", object_size,
+                          pressure_config);
+    ASSERT_FALSE(pressure_result.has_value());
+
+    WaitUntil([&] {
+        auto kv_exists = service->ExistKey("kv_key", "default");
+        return kv_exists.has_value() && !kv_exists.value();
+    });
+
+    auto weight_exists = service->ExistKey("weight_key", "default");
+    ASSERT_TRUE(weight_exists.has_value());
+    EXPECT_TRUE(weight_exists.value());
+
+    service->RemoveAll();
 }
 
 TEST_F(MasterServiceTest, RemoveSoftPinObject) {
