@@ -4199,6 +4199,42 @@ TEST_F(MasterServiceTest, SoftPinObjectsCanBeEvicted) {
     service_->RemoveAll();
 }
 
+TEST_F(MasterServiceTest, ObjectTypeEvictionScanSummaryIsComputedFromMetadata) {
+    auto service_config = MasterServiceConfig::builder()
+                              .set_default_kv_lease_ttl(1)
+                              .set_default_kv_soft_pin_ttl(10000)
+                              .set_allow_evict_soft_pinned_objects(true)
+                              .build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+    const UUID client_id = generate_uuid();
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(*service_);
+
+    ReplicateConfig weight_config;
+    weight_config.replica_num = 1;
+    weight_config.data_type = ObjectDataType::WEIGHT;
+
+    ReplicateConfig kv_config;
+    kv_config.replica_num = 1;
+    kv_config.data_type = ObjectDataType::KVCACHE;
+    kv_config.with_soft_pin = true;
+
+    PutCompletedObject(*service_, client_id, "weight_key", weight_config);
+    PutCompletedObject(*service_, client_id, "kv_key", kv_config);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    auto summary = service_->GetObjectTypeEvictionScanSummaryForTesting();
+    EXPECT_EQ(summary.used_bytes_by_type.at(ObjectDataType::WEIGHT), 1024);
+    EXPECT_EQ(summary.used_bytes_by_type.at(ObjectDataType::KVCACHE), 1024);
+    EXPECT_EQ(summary.eviction_base_by_type.at(ObjectDataType::WEIGHT), 1);
+    EXPECT_EQ(summary.eviction_base_by_type.at(ObjectDataType::KVCACHE), 1);
+    EXPECT_EQ(
+        summary.no_soft_pin_candidates_by_type.at(ObjectDataType::WEIGHT), 1);
+    EXPECT_FALSE(summary.no_soft_pin_candidates_by_type.contains(
+        ObjectDataType::KVCACHE));
+    EXPECT_EQ(summary.total_eviction_base, 2);
+}
+
 TEST_F(MasterServiceTest, SoftPinExtendedOnGet) {
     const uint64_t kv_lease_ttl = 200;
     // The soft pin ttl shall not be too large, otherwise the test will take too

@@ -99,6 +99,15 @@ class MasterService {
         const UUID& segment_id);
     std::optional<TenantQuotaSnapshot> GetTenantQuotaSnapshotForTesting(
         const std::string& tenant_id) const;
+    struct ObjectTypeEvictionScanSummaryForTesting {
+        std::unordered_map<ObjectDataType, uint64_t> used_bytes_by_type;
+        std::unordered_map<ObjectDataType, long> eviction_base_by_type;
+        std::unordered_map<ObjectDataType, size_t>
+            no_soft_pin_candidates_by_type;
+        long total_eviction_base{0};
+    };
+    ObjectTypeEvictionScanSummaryForTesting
+    GetObjectTypeEvictionScanSummaryForTesting();
     bool IsTenantQuotaEnabled() const;
     std::vector<TenantQuotaSnapshot> ListTenantQuotaSnapshots() const;
     std::optional<TenantQuotaSnapshot> GetTenantQuotaSnapshot(
@@ -816,6 +825,25 @@ class MasterService {
     // evict ratio target. If the actual evicted ratio is less than
     // evict_ratio_lowerbound, the second pass will be triggered and try to
     // fulfill evict ratio lowerbound.
+    struct EvictionCandidate {
+        size_t shard_idx;
+        std::string tenant_id;
+        std::string key;
+        std::chrono::system_clock::time_point lease_timeout;
+        int64_t adjusted_age;
+    };
+
+    struct ObjectTypeEvictionScanSummary {
+        std::vector<EvictionCandidate> candidates;
+        std::vector<int64_t> soft_pin_objects;
+        std::unordered_map<ObjectDataType, std::vector<EvictionCandidate>>
+            per_type_candidates;
+        std::unordered_map<ObjectDataType, long> per_type_eviction_base;
+        std::unordered_map<ObjectDataType, uint64_t> per_type_used_bytes;
+        long total_eviction_base{0};
+        long object_count{0};
+    };
+
     void BatchEvict(double evict_ratio_target, double evict_ratio_lowerbound);
     void NoFBatchEvict(double evict_ratio_target,
                        double evict_ratio_lowerbound);
@@ -1200,6 +1228,14 @@ class MasterService {
         std::chrono::system_clock::time_point start_time;
         UUID holder_id;  // owner of source LOCAL_DISK; only Notifier allowed
     };
+
+    int64_t ComputeEvictionAdjustedAge(
+        const ObjectMetadata& metadata,
+        const std::chrono::system_clock::time_point& rank_reference_time,
+        bool is_soft_pinned) const;
+    ObjectTypeEvictionScanSummary CollectObjectTypeEvictionScanSummary(
+        const std::chrono::system_clock::time_point& now,
+        const std::function<bool(const ObjectMetadata&)>& can_evict_replicas);
 
     static constexpr size_t kNumShards = 1024;  // Number of metadata shards
 
