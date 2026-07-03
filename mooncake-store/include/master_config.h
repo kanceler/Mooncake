@@ -20,6 +20,10 @@ struct ObjectTypeEvictionScorePolicy {
     double soft_pin_weight{1.0};
 };
 
+struct ObjectTypeEvictionPolicy {
+    double budget_ratio{1.0};
+};
+
 inline std::string ResolveConfiguredHABackendConnstring(
     std::string_view ha_backend_type, std::string_view ha_backend_connstring,
     std::string_view etcd_endpoints) {
@@ -625,6 +629,8 @@ class MasterServiceConfigBuilder {
     uint64_t default_kv_soft_pin_ttl_ = DEFAULT_KV_SOFT_PIN_TTL_MS;
     std::unordered_map<ObjectDataType, ObjectTypeEvictionScorePolicy>
         object_type_eviction_score_policies_;
+    std::unordered_map<ObjectDataType, ObjectTypeEvictionPolicy>
+        object_type_eviction_policies_;
     bool allow_evict_soft_pinned_objects_ =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     double eviction_ratio_ = DEFAULT_EVICTION_RATIO;
@@ -697,6 +703,12 @@ class MasterServiceConfigBuilder {
             throw std::invalid_argument("reuse_scale must be greater than 0");
         }
         object_type_eviction_score_policies_[data_type] = policy;
+        return *this;
+    }
+
+    MasterServiceConfigBuilder& set_object_type_eviction_policy(
+        ObjectDataType data_type, ObjectTypeEvictionPolicy policy) {
+        object_type_eviction_policies_[data_type] = policy;
         return *this;
     }
 
@@ -974,6 +986,8 @@ class MasterServiceConfig {
     uint64_t default_kv_soft_pin_ttl = DEFAULT_KV_SOFT_PIN_TTL_MS;
     std::unordered_map<ObjectDataType, ObjectTypeEvictionScorePolicy>
         object_type_eviction_score_policies;
+    std::unordered_map<ObjectDataType, ObjectTypeEvictionPolicy>
+        object_type_eviction_policies;
     bool allow_evict_soft_pinned_objects =
         DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS;
     double eviction_ratio = DEFAULT_EVICTION_RATIO;
@@ -1122,6 +1136,7 @@ inline MasterServiceConfig MasterServiceConfigBuilder::build() const {
     config.default_kv_soft_pin_ttl = default_kv_soft_pin_ttl_;
     config.object_type_eviction_score_policies =
         object_type_eviction_score_policies_;
+    config.object_type_eviction_policies = object_type_eviction_policies_;
     config.allow_evict_soft_pinned_objects = allow_evict_soft_pinned_objects_;
     config.eviction_ratio = eviction_ratio_;
     config.eviction_high_watermark_ratio = eviction_high_watermark_ratio_;
