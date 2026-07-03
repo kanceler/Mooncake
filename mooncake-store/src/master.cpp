@@ -3,12 +3,14 @@
 
 #include <atomic>  // For std::atomic
 #include <chrono>  // For std::chrono
+#include <cmath>
 #include <csignal>
 #include <cstdlib>  // For std::getenv
 #include <fstream>  // For std::ifstream
 #include <memory>   // For std::unique_ptr
 #include <string>
 #include <thread>  // For std::thread
+#include <unordered_map>
 #include <json/json.h>
 #include <ylt/coro_rpc/coro_rpc_server.hpp>
 #include <ylt/easylog/record.hpp>
@@ -62,6 +64,155 @@ uint64_t ParseDurationFlagOrDie(const char* flag_name,
                    << ". " << error;
     }
     return parsed_value;
+}
+
+std::string Trim(std::string value) {
+    const auto begin = value.find_first_not_of(" \t\n\r");
+    if (begin == std::string::npos) {
+        return "";
+    }
+    const auto end = value.find_last_not_of(" \t\n\r");
+    return value.substr(begin, end - begin + 1);
+}
+
+bool ParseObjectDataType(const std::string& value,
+                         mooncake::ObjectDataType* data_type) {
+    static const std::unordered_map<std::string, mooncake::ObjectDataType>
+        kTypes{{"UNKNOWN", mooncake::ObjectDataType::UNKNOWN},
+               {"KVCACHE", mooncake::ObjectDataType::KVCACHE},
+               {"TENSOR", mooncake::ObjectDataType::TENSOR},
+               {"WEIGHT", mooncake::ObjectDataType::WEIGHT},
+               {"SAMPLE", mooncake::ObjectDataType::SAMPLE},
+               {"ACTIVATION", mooncake::ObjectDataType::ACTIVATION},
+               {"GRADIENT", mooncake::ObjectDataType::GRADIENT},
+               {"OPTIMIZER_STATE", mooncake::ObjectDataType::OPTIMIZER_STATE},
+               {"METADATA", mooncake::ObjectDataType::METADATA},
+               {"GENERAL", mooncake::ObjectDataType::GENERAL}};
+    auto it = kTypes.find(value);
+    if (it == kTypes.end()) {
+        return false;
+    }
+    *data_type = it->second;
+    return true;
+}
+
+bool ParseObjectTypeEvictionScorePolicies(
+    const std::string& value,
+    std::unordered_map<mooncake::ObjectDataType,
+                       mooncake::ObjectTypeEvictionScorePolicy>* policies,
+    std::string* error) {
+    policies->clear();
+    if (Trim(value).empty()) {
+        return true;
+    }
+
+    size_t entry_start = 0;
+    while (entry_start <= value.size()) {
+        const size_t entry_end = value.find(';', entry_start);
+        std::string entry =
+            Trim(value.substr(entry_start, entry_end - entry_start));
+        if (!entry.empty()) {
+            const size_t colon = entry.find(':');
+            if (colon == std::string::npos) {
+                *error = "missing ':' in entry: " + entry;
+                return false;
+            }
+
+            mooncake::ObjectDataType data_type;
+            if (!ParseObjectDataType(Trim(entry.substr(0, colon)),
+                                     &data_type)) {
+                *error = "unknown object data type in entry: " + entry;
+                return false;
+            }
+            if (policies->find(data_type) != policies->end()) {
+                *error = "duplicate object data type in entry: " + entry;
+                return false;
+            }
+
+            mooncake::ObjectTypeEvictionScorePolicy policy;
+            size_t field_start = colon + 1;
+            while (field_start <= entry.size()) {
+                const size_t field_end = entry.find(',', field_start);
+                std::string field =
+                    Trim(entry.substr(field_start, field_end - field_start));
+                if (!field.empty()) {
+                    const size_t equals = field.find('=');
+                    if (equals == std::string::npos) {
+                        *error = "missing '=' in field: " + field;
+                        return false;
+                    }
+                    const std::string key = Trim(field.substr(0, equals));
+                    const std::string field_value =
+                        Trim(field.substr(equals + 1));
+                    if (key == "reuse_scale" || key == "reuse_scale_ms") {
+                        uint64_t parsed = 0;
+                        std::string parse_error;
+                        if (!mooncake::ParseDurationMs(field_value, &parsed,
+                                                       &parse_error) ||
+                            parsed == 0) {
+                            *error = "invalid reuse_scale in field: " + field;
+                            return false;
+                        }
+                        policy.reuse_scale_ms = parsed;
+                    } else if (key == "soft_pin_weight") {
+                        char* parse_end = nullptr;
+                        const double parsed =
+                            std::strtod(field_value.c_str(), &parse_end);
+                        if (parse_end == field_value.c_str() ||
+                            *parse_end != '\0' || !std::isfinite(parsed) ||
+                            parsed < 0.0) {
+                            *error =
+                                "invalid soft_pin_weight in field: " + field;
+                            return false;
+                        }
+                        policy.soft_pin_weight = parsed;
+                    } else {
+                        *error = "unknown policy key in field: " + field;
+                        return false;
+                    }
+                }
+                if (field_end == std::string::npos) {
+                    break;
+                }
+                field_start = field_end + 1;
+            }
+            policies->emplace(data_type, policy);
+        }
+        if (entry_end == std::string::npos) {
+            break;
+        }
+        entry_start = entry_end + 1;
+    }
+    return true;
+}
+
+bool ValidateObjectTypeEvictionScorePolicies(const char* flagname,
+                                             const std::string& value) {
+    std::unordered_map<mooncake::ObjectDataType,
+                       mooncake::ObjectTypeEvictionScorePolicy>
+        policies;
+    std::string error;
+    if (!ParseObjectTypeEvictionScorePolicies(value, &policies, &error)) {
+        LOG(ERROR) << "Invalid value for --" << flagname << ": " << value
+                   << ". " << error;
+        return false;
+    }
+    return true;
+}
+
+std::unordered_map<mooncake::ObjectDataType,
+                   mooncake::ObjectTypeEvictionScorePolicy>
+ParseObjectTypeEvictionScorePoliciesOrDie(const char* flag_name,
+                                          const std::string& value) {
+    std::unordered_map<mooncake::ObjectDataType,
+                       mooncake::ObjectTypeEvictionScorePolicy>
+        policies;
+    std::string error;
+    if (!ParseObjectTypeEvictionScorePolicies(value, &policies, &error)) {
+        LOG(FATAL) << "Invalid value for --" << flag_name << ": " << value
+                   << ". " << error;
+    }
+    return policies;
 }
 
 // Derive the metadata server address for cleanup when it is deployed
@@ -127,8 +278,14 @@ DEFINE_string(default_kv_soft_pin_ttl, kDefaultKvSoftPinTtlFlagValue,
 DEFINE_bool(allow_evict_soft_pinned_objects,
             mooncake::DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS,
             "Whether to allow eviction of soft pinned objects during eviction");
+DEFINE_string(object_type_eviction_score_policies, "",
+              "Object type eviction score policies. Format: "
+              "TYPE:reuse_scale=20s,soft_pin_weight=1.0;"
+              "TYPE2:reuse_scale=250s,soft_pin_weight=0.2");
 DEFINE_validator(default_kv_lease_ttl, ValidateDurationFlag);
 DEFINE_validator(default_kv_soft_pin_ttl, ValidateDurationFlag);
+DEFINE_validator(object_type_eviction_score_policies,
+                 ValidateObjectTypeEvictionScorePolicies);
 DEFINE_double(eviction_ratio, mooncake::DEFAULT_EVICTION_RATIO,
               "Ratio of objects to evict when Memory space is full");
 DEFINE_double(eviction_high_watermark_ratio,
@@ -427,6 +584,14 @@ void InitMasterConf(const mooncake::DefaultConfig& default_config,
     default_config.GetBool("allow_evict_soft_pinned_objects",
                            &master_config.allow_evict_soft_pinned_objects,
                            FLAGS_allow_evict_soft_pinned_objects);
+    std::string object_type_eviction_score_policies;
+    default_config.GetString("object_type_eviction_score_policies",
+                             &object_type_eviction_score_policies,
+                             FLAGS_object_type_eviction_score_policies);
+    master_config.object_type_eviction_score_policies =
+        ParseObjectTypeEvictionScorePoliciesOrDie(
+            "object_type_eviction_score_policies",
+            object_type_eviction_score_policies);
     default_config.GetDouble("eviction_ratio", &master_config.eviction_ratio,
                              FLAGS_eviction_ratio);
     default_config.GetDouble("eviction_high_watermark_ratio",
@@ -716,6 +881,15 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.allow_evict_soft_pinned_objects =
             FLAGS_allow_evict_soft_pinned_objects;
+    }
+    if ((google::GetCommandLineFlagInfo("object_type_eviction_score_policies",
+                                        &info) &&
+         !info.is_default) ||
+        !conf_set) {
+        master_config.object_type_eviction_score_policies =
+            ParseObjectTypeEvictionScorePoliciesOrDie(
+                "object_type_eviction_score_policies",
+                FLAGS_object_type_eviction_score_policies);
     }
     if ((google::GetCommandLineFlagInfo("eviction_ratio", &info) &&
          !info.is_default) ||
@@ -1249,6 +1423,8 @@ int main(int argc, char* argv[]) {
         << ", default_kv_soft_pin_ttl=" << master_config.default_kv_soft_pin_ttl
         << ", allow_evict_soft_pinned_objects="
         << master_config.allow_evict_soft_pinned_objects
+        << ", object_type_eviction_score_policies="
+        << master_config.object_type_eviction_score_policies.size()
         << ", eviction_ratio=" << master_config.eviction_ratio
         << ", eviction_high_watermark_ratio="
         << master_config.eviction_high_watermark_ratio

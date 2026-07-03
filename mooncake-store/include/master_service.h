@@ -61,6 +61,7 @@ class SnapshotChildProcessTest;
 // exposing test-only accessors on MasterService itself.
 class PromotionOnHitTest;
 class MasterServiceTenantQuotaTest;
+class MasterServiceTest;
 }  // namespace test
 
 /*
@@ -83,6 +84,7 @@ class MasterService {
     friend class test::SnapshotChildProcessTest;
     friend class test::PromotionOnHitTest;
     friend class test::MasterServiceTenantQuotaTest;
+    friend class test::MasterServiceTest;
 
    public:
     using NoFProbeFn =
@@ -808,10 +810,11 @@ class MasterService {
     void HandleChildTimeout(pid_t pid, const std::string& snapshot_id);
     void HandleChildExit(pid_t pid, int status, const std::string& snapshot_id);
 
-    // BatchEvict evicts objects in a near-LRU way, i.e., prioritizes to evict
-    // object with smaller lease timeout. It has two passes. The first pass only
-    // evicts objects without soft pin. The second pass prioritizes objects
-    // without soft pin, but also allows to evict soft pinned objects if
+    // BatchEvict evicts objects in a near-LRU way. By default it prioritizes
+    // smaller lease timeouts; when type score policies are configured, it ranks
+    // expired objects by normalized expired age. It has two passes. The first
+    // pass only evicts objects without soft pin. The second pass prioritizes
+    // objects without soft pin, but also allows to evict soft pinned objects if
     // allow_evict_soft_pinned_objects_ is true. The first pass tries fulfill
     // evict ratio target. If the actual evicted ratio is less than
     // evict_ratio_lowerbound, the second pass will be triggered and try to
@@ -1535,8 +1538,8 @@ class MasterService {
     // Lease related members
     const uint64_t default_kv_lease_ttl_;     // in milliseconds
     const uint64_t default_kv_soft_pin_ttl_;  // in milliseconds
-    const std::unordered_map<ObjectDataType, ObjectTypeLeasePolicy>
-        object_type_lease_policies_;
+    const std::unordered_map<ObjectDataType, ObjectTypeEvictionScorePolicy>
+        object_type_eviction_score_policies_;
     const bool allow_evict_soft_pinned_objects_;
 
     // Eviction related members
