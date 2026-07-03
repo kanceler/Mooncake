@@ -27,6 +27,48 @@
 
 namespace mooncake::test {
 
+TEST(MasterServiceEvictionBudgetPolicyTest,
+     BudgetCorrectionRatioUsesGlobalCapacityOverage) {
+    EXPECT_NEAR(
+        0.02,
+        ComputeObjectTypeBudgetCorrectionRatio(
+            /*type_used_bytes=*/82,
+            /*total_mem_capacity=*/100,
+            /*budget_ratio=*/0.80,
+            /*evict_ratio_target=*/0.05),
+        1e-9);
+    EXPECT_DOUBLE_EQ(
+        0.05,
+        ComputeObjectTypeBudgetCorrectionRatio(
+            /*type_used_bytes=*/95,
+            /*total_mem_capacity=*/100,
+            /*budget_ratio=*/0.80,
+            /*evict_ratio_target=*/0.05));
+    EXPECT_DOUBLE_EQ(
+        0.0,
+        ComputeObjectTypeBudgetCorrectionRatio(
+            /*type_used_bytes=*/79,
+            /*total_mem_capacity=*/100,
+            /*budget_ratio=*/0.80,
+            /*evict_ratio_target=*/0.05));
+}
+
+TEST(MasterServiceEvictionBudgetPolicyTest,
+     RemainingEvictionOnlyFillsTargetGap) {
+    EXPECT_EQ(0, ComputeRemainingEvictCount(
+                     /*total_eviction_base=*/10000,
+                     /*evicted_count=*/500,
+                     /*evict_ratio_target=*/0.05));
+    EXPECT_EQ(200, ComputeRemainingEvictCount(
+                       /*total_eviction_base=*/10000,
+                       /*evicted_count=*/300,
+                       /*evict_ratio_target=*/0.05));
+    EXPECT_EQ(0, ComputeRemainingEvictCount(
+                     /*total_eviction_base=*/10000,
+                     /*evicted_count=*/600,
+                     /*evict_ratio_target=*/0.05));
+}
+
 class MasterServiceTest : public ::testing::Test {
    protected:
     void SetUp() override {

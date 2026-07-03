@@ -45,6 +45,34 @@
 
 namespace mooncake {
 
+double ComputeObjectTypeBudgetCorrectionRatio(uint64_t type_used_bytes,
+                                              int64_t total_mem_capacity,
+                                              double budget_ratio,
+                                              double evict_ratio_target) {
+    if (type_used_bytes == 0 || total_mem_capacity <= 0 ||
+        evict_ratio_target <= 0.0) {
+        return 0.0;
+    }
+    const double type_used_ratio =
+        static_cast<double>(type_used_bytes) /
+        static_cast<double>(total_mem_capacity);
+    const double over_budget_ratio = type_used_ratio - budget_ratio;
+    if (over_budget_ratio <= 0.0) {
+        return 0.0;
+    }
+    return std::min(evict_ratio_target, over_budget_ratio);
+}
+
+long ComputeRemainingEvictCount(long total_eviction_base, long evicted_count,
+                                double evict_ratio_target) {
+    if (total_eviction_base <= 0 || evict_ratio_target <= 0.0) {
+        return 0;
+    }
+    const long target_evict_num =
+        static_cast<long>(std::ceil(total_eviction_base * evict_ratio_target));
+    return std::max<long>(0, target_evict_num - evicted_count);
+}
+
 // Snapshot file names
 static const std::string SNAPSHOT_METADATA_FILE = "metadata";
 static const std::string SNAPSHOT_SEGMENTS_FILE = "segments";
@@ -184,10 +212,6 @@ void SubtractTypeUsedBytes(TenantQuotaState* state,
     }
     auto& type_state = state->object_type_usage[data_type];
     if (type_state.used_bytes < bytes) {
-        LOG(WARNING) << "tenant object type used accounting mismatch tenant="
-                     << tenant_id << ", data_type=" << toString(data_type)
-                     << ", requested=" << bytes
-                     << ", available=" << type_state.used_bytes;
         type_state.used_bytes = 0;
     } else {
         type_state.used_bytes -= bytes;
@@ -7678,18 +7702,13 @@ void MasterService::BatchEvict(double evict_ratio_target,
 
             const double budget_ratio =
                 std::max(0.0, object_type_budget_ratios_[idx]);
-            const double type_budget_bytes =
-                static_cast<double>(total_mem_capacity) * budget_ratio;
-            const double type_used_bytes =
-                static_cast<double>(type_used_bytes_u64);
-            if (type_used_bytes <= type_budget_bytes) {
+            const double type_evict_ratio =
+                ComputeObjectTypeBudgetCorrectionRatio(
+                    type_used_bytes_u64, total_mem_capacity, budget_ratio,
+                    evict_ratio_target);
+            if (type_evict_ratio <= 0.0) {
                 continue;
             }
-
-            const double type_over_ratio =
-                (type_used_bytes - type_budget_bytes) / type_used_bytes;
-            const double type_evict_ratio =
-                std::min(evict_ratio_target, type_over_ratio);
             long type_evict_num =
                 std::ceil(base_it->second * type_evict_ratio);
             type_evict_num = std::min(
@@ -7699,17 +7718,8 @@ void MasterService::BatchEvict(double evict_ratio_target,
         }
     }
 
-    double used_ratio =
-        MasterMetricManager::instance().get_global_mem_used_ratio();
-    evict_ratio_target = std::max(
-        eviction_ratio_,
-        used_ratio - eviction_high_watermark_ratio_ + eviction_ratio_);
-    evict_ratio_lowerbound = std::max(
-        evict_ratio_target * 0.5,
-        used_ratio - eviction_high_watermark_ratio_);
-    const long remaining_evict_num = std::ceil(
-        std::max<long>(0, total_eviction_base - evicted_count) *
-        evict_ratio_target);
+    const long remaining_evict_num = ComputeRemainingEvictCount(
+        total_eviction_base, evicted_count, evict_ratio_target);
     evict_no_soft_pin_candidates(candidates, remaining_evict_num,
                                  /*collect_remaining_no_pin=*/true);
 
