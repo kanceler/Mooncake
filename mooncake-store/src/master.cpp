@@ -2,10 +2,7 @@
 #include <glog/logging.h>
 
 #include <atomic>  // For std::atomic
-#include <cerrno>
-#include <cctype>
 #include <chrono>  // For std::chrono
-#include <cmath>
 #include <csignal>
 #include <cstdlib>  // For std::getenv
 #include <fstream>  // For std::ifstream
@@ -13,7 +10,6 @@
 #include <string>
 #include <string_view>
 #include <thread>  // For std::thread
-#include <unordered_map>
 #include <json/json.h>
 #include <ylt/coro_rpc/coro_rpc_server.hpp>
 #include <ylt/easylog/record.hpp>
@@ -67,199 +63,6 @@ uint64_t ParseDurationFlagOrDie(const char* flag_name,
                    << ". " << error;
     }
     return parsed_value;
-}
-
-std::string Trim(std::string_view value) {
-    size_t begin = 0;
-    while (begin < value.size() &&
-           std::isspace(static_cast<unsigned char>(value[begin]))) {
-        begin++;
-    }
-    size_t end = value.size();
-    while (end > begin &&
-           std::isspace(static_cast<unsigned char>(value[end - 1]))) {
-        end--;
-    }
-    return std::string(value.substr(begin, end - begin));
-}
-
-bool ParseObjectDataType(std::string_view value,
-                         mooncake::ObjectDataType* data_type) {
-    static const std::unordered_map<std::string_view, mooncake::ObjectDataType>
-        type_names{
-            {"UNKNOWN", mooncake::ObjectDataType::UNKNOWN},
-            {"KVCACHE", mooncake::ObjectDataType::KVCACHE},
-            {"TENSOR", mooncake::ObjectDataType::TENSOR},
-            {"WEIGHT", mooncake::ObjectDataType::WEIGHT},
-            {"SAMPLE", mooncake::ObjectDataType::SAMPLE},
-            {"ACTIVATION", mooncake::ObjectDataType::ACTIVATION},
-            {"GRADIENT", mooncake::ObjectDataType::GRADIENT},
-            {"OPTIMIZER_STATE", mooncake::ObjectDataType::OPTIMIZER_STATE},
-            {"METADATA", mooncake::ObjectDataType::METADATA},
-            {"GENERAL", mooncake::ObjectDataType::GENERAL},
-            {"HIDDEN_STATE", mooncake::ObjectDataType::HIDDEN_STATE}};
-
-    const std::string normalized = Trim(value);
-    auto it =
-        type_names.find(std::string_view(normalized.data(), normalized.size()));
-    if (it == type_names.end()) {
-        return false;
-    }
-    *data_type = it->second;
-    return true;
-}
-
-double ParseDoubleFlagFieldOrDie(const char* flag_name, std::string_view field,
-                                 std::string_view value) {
-    const std::string normalized = Trim(value);
-    errno = 0;
-    char* end = nullptr;
-    const double parsed = std::strtod(normalized.c_str(), &end);
-    if (errno != 0 || end == normalized.c_str() || *end != '\0' ||
-        !std::isfinite(parsed)) {
-        LOG(FATAL) << "Invalid value for --" << flag_name << " " << field
-                   << ": " << normalized;
-    }
-    return parsed;
-}
-
-int64_t ParseInt64FlagFieldOrDie(const char* flag_name, std::string_view field,
-                                 std::string_view value) {
-    const std::string normalized = Trim(value);
-    errno = 0;
-    char* end = nullptr;
-    const long long parsed = std::strtoll(normalized.c_str(), &end, 10);
-    if (errno != 0 || end == normalized.c_str() || *end != '\0') {
-        LOG(FATAL) << "Invalid value for --" << flag_name << " " << field
-                   << ": " << normalized;
-    }
-    return static_cast<int64_t>(parsed);
-}
-
-template <typename ParamHandler>
-void ForEachObjectTypePolicyParamOrDie(const char* flag_name,
-                                       const std::string& value,
-                                       std::string_view expected_format,
-                                       ParamHandler&& handle_param) {
-    std::string_view remaining(value.data(), value.size());
-    while (!remaining.empty()) {
-        const size_t sep = remaining.find(';');
-        const std::string entry = Trim(remaining.substr(0, sep));
-        remaining = sep == std::string_view::npos ? std::string_view()
-                                                  : remaining.substr(sep + 1);
-        if (entry.empty()) {
-            continue;
-        }
-
-        const size_t colon = entry.find(':');
-        if (colon == std::string::npos || colon == 0 ||
-            colon + 1 >= entry.size()) {
-            LOG(FATAL) << "Invalid value for --" << flag_name << ": " << entry
-                       << ". Expected " << expected_format;
-        }
-
-        mooncake::ObjectDataType data_type;
-        std::string_view entry_view(entry.data(), entry.size());
-        if (!ParseObjectDataType(entry_view.substr(0, colon), &data_type)) {
-            LOG(FATAL) << "Invalid object data type in --" << flag_name << ": "
-                       << entry.substr(0, colon);
-        }
-
-        std::string_view params = entry_view.substr(colon + 1);
-        while (!params.empty()) {
-            const size_t comma = params.find(',');
-            const std::string param = Trim(params.substr(0, comma));
-            params = comma == std::string_view::npos ? std::string_view()
-                                                     : params.substr(comma + 1);
-            if (param.empty()) {
-                continue;
-            }
-
-            const size_t equal = param.find('=');
-            if (equal == std::string::npos || equal == 0 ||
-                equal + 1 >= param.size()) {
-                LOG(FATAL) << "Invalid policy parameter in --" << flag_name
-                           << ": " << param;
-            }
-
-            std::string_view param_view(param.data(), param.size());
-            const std::string_view key = param_view.substr(0, equal);
-            const std::string_view param_value = param_view.substr(equal + 1);
-            handle_param(data_type, key, param_value);
-        }
-    }
-}
-
-std::unordered_map<mooncake::ObjectDataType,
-                   mooncake::ObjectTypeEvictionScorePolicy>
-ParseObjectTypeEvictionScorePoliciesOrDie(const char* flag_name,
-                                          const std::string& value) {
-    std::unordered_map<mooncake::ObjectDataType,
-                       mooncake::ObjectTypeEvictionScorePolicy>
-        policies;
-    ForEachObjectTypePolicyParamOrDie(
-        flag_name, value,
-        "TYPE:reuse_scale=...,soft_pin_weight=...,"
-        "eviction_grace=<milliseconds>",
-        [&](mooncake::ObjectDataType data_type, std::string_view key,
-            std::string_view param_value) {
-            auto& policy = policies[data_type];
-            if (key == "reuse_scale") {
-                policy.reuse_scale =
-                    ParseDoubleFlagFieldOrDie(flag_name, key, param_value);
-                if (policy.reuse_scale <= 0.0) {
-                    LOG(FATAL) << "Invalid value for --" << flag_name
-                               << " reuse_scale: " << policy.reuse_scale
-                               << ". Expected a value greater than 0";
-                }
-                return;
-            }
-            if (key == "soft_pin_weight") {
-                policy.soft_pin_weight =
-                    ParseDoubleFlagFieldOrDie(flag_name, key, param_value);
-                if (policy.soft_pin_weight < 0.0) {
-                    LOG(FATAL) << "Invalid value for --" << flag_name
-                               << " soft_pin_weight: " << policy.soft_pin_weight
-                               << ". Expected a non-negative value";
-                }
-                return;
-            }
-            if (key == "eviction_grace") {
-                policy.eviction_grace =
-                    ParseInt64FlagFieldOrDie(flag_name, key, param_value);
-                return;
-            }
-            LOG(FATAL) << "Unknown policy parameter in --" << flag_name << ": "
-                       << key;
-        });
-    return policies;
-}
-
-std::unordered_map<mooncake::ObjectDataType, mooncake::ObjectTypeEvictionPolicy>
-ParseObjectTypeEvictionPoliciesOrDie(const char* flag_name,
-                                     const std::string& value) {
-    std::unordered_map<mooncake::ObjectDataType,
-                       mooncake::ObjectTypeEvictionPolicy>
-        policies;
-    ForEachObjectTypePolicyParamOrDie(
-        flag_name, value, "TYPE:budget_ratio=...",
-        [&](mooncake::ObjectDataType data_type, std::string_view key,
-            std::string_view param_value) {
-            auto& policy = policies[data_type];
-            if (key == "budget_ratio") {
-                policy.budget_ratio =
-                    ParseDoubleFlagFieldOrDie(flag_name, key, param_value);
-                if (policy.budget_ratio < 0.0 || policy.budget_ratio > 1.0) {
-                    LOG(FATAL) << "Invalid value for --" << flag_name
-                               << " budget_ratio: " << policy.budget_ratio
-                               << ". Expected a value between 0.0 and 1.0";
-                }
-                return;
-            }
-            LOG(FATAL) << "Unknown policy parameter in --" << flag_name << ": "
-                       << key;
-        });
-    return policies;
 }
 
 // Derive the metadata server address for cleanup when it is deployed
@@ -325,13 +128,6 @@ DEFINE_string(default_kv_soft_pin_ttl, kDefaultKvSoftPinTtlFlagValue,
 DEFINE_bool(allow_evict_soft_pinned_objects,
             mooncake::DEFAULT_ALLOW_EVICT_SOFT_PINNED_OBJECTS,
             "Whether to allow eviction of soft pinned objects during eviction");
-DEFINE_string(object_type_eviction_score_policies, "",
-              "Per-object-type eviction score policies. Format: "
-              "TYPE:reuse_scale=...,soft_pin_weight=...,"
-              "eviction_grace=<milliseconds>;TYPE:...");
-DEFINE_string(object_type_eviction_policies, "",
-              "Per-object-type eviction budget policies. Format: "
-              "TYPE:budget_ratio=...;TYPE:...");
 DEFINE_validator(default_kv_lease_ttl, ValidateDurationFlag);
 DEFINE_validator(default_kv_soft_pin_ttl, ValidateDurationFlag);
 DEFINE_double(eviction_ratio, mooncake::DEFAULT_EVICTION_RATIO,
@@ -921,22 +717,6 @@ void LoadConfigFromCmdline(mooncake::MasterConfig& master_config,
         !conf_set) {
         master_config.allow_evict_soft_pinned_objects =
             FLAGS_allow_evict_soft_pinned_objects;
-    }
-    if ((google::GetCommandLineFlagInfo("object_type_eviction_score_policies",
-                                        &info) &&
-         !info.is_default)) {
-        master_config.object_type_eviction_score_policies =
-            ParseObjectTypeEvictionScorePoliciesOrDie(
-                "object_type_eviction_score_policies",
-                FLAGS_object_type_eviction_score_policies);
-    }
-    if ((google::GetCommandLineFlagInfo("object_type_eviction_policies",
-                                        &info) &&
-         !info.is_default)) {
-        master_config.object_type_eviction_policies =
-            ParseObjectTypeEvictionPoliciesOrDie(
-                "object_type_eviction_policies",
-                FLAGS_object_type_eviction_policies);
     }
     if ((google::GetCommandLineFlagInfo("eviction_ratio", &info) &&
          !info.is_default) ||
