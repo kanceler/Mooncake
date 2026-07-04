@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -26,6 +27,52 @@
 #include "types.h"
 
 namespace mooncake::test {
+
+TEST(MasterServiceEvictionScorePolicyTest, RejectsInvalidScorePolicy) {
+    auto builder = MasterServiceConfig::builder();
+    ObjectTypeEvictionScorePolicy policy;
+
+    policy.reuse_scale = 0.0;
+    EXPECT_THROW(builder.set_object_type_eviction_score_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+
+    policy.reuse_scale = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(builder.set_object_type_eviction_score_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+
+    policy.reuse_scale = 1.0;
+    policy.soft_pin_weight = -1.0;
+    EXPECT_THROW(builder.set_object_type_eviction_score_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+
+    policy.soft_pin_weight = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(builder.set_object_type_eviction_score_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+}
+
+TEST(MasterServiceEvictionBudgetPolicyTest, RejectsInvalidBudgetPolicy) {
+    auto builder = MasterServiceConfig::builder();
+    ObjectTypeEvictionPolicy policy;
+
+    policy.budget_ratio = -0.1;
+    EXPECT_THROW(builder.set_object_type_eviction_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+
+    policy.budget_ratio = 1.1;
+    EXPECT_THROW(builder.set_object_type_eviction_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+
+    policy.budget_ratio = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(builder.set_object_type_eviction_policy(
+                     ObjectDataType::HIDDEN_STATE, policy),
+                 std::invalid_argument);
+}
 
 TEST(MasterServiceEvictionBudgetPolicyTest,
      BudgetCorrectionRatioUsesGlobalCapacityOverage) {

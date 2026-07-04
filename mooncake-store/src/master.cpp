@@ -199,7 +199,8 @@ ParseObjectTypeEvictionScorePoliciesOrDie(const char* flag_name,
         policies;
     ForEachObjectTypePolicyParamOrDie(
         flag_name, value,
-        "TYPE:reuse_scale=...,soft_pin_weight=...,eviction_grace=...",
+        "TYPE:reuse_scale=...,soft_pin_weight=...,"
+        "eviction_grace=<milliseconds>",
         [&](mooncake::ObjectDataType data_type, std::string_view key,
             std::string_view param_value) {
             auto& policy = policies[data_type];
@@ -216,6 +217,11 @@ ParseObjectTypeEvictionScorePoliciesOrDie(const char* flag_name,
             if (key == "soft_pin_weight") {
                 policy.soft_pin_weight =
                     ParseDoubleFlagFieldOrDie(flag_name, key, param_value);
+                if (policy.soft_pin_weight < 0.0) {
+                    LOG(FATAL) << "Invalid value for --" << flag_name
+                               << " soft_pin_weight: " << policy.soft_pin_weight
+                               << ". Expected a non-negative value";
+                }
                 return;
             }
             if (key == "eviction_grace") {
@@ -243,6 +249,11 @@ ParseObjectTypeEvictionPoliciesOrDie(const char* flag_name,
             if (key == "budget_ratio") {
                 policy.budget_ratio =
                     ParseDoubleFlagFieldOrDie(flag_name, key, param_value);
+                if (policy.budget_ratio < 0.0 || policy.budget_ratio > 1.0) {
+                    LOG(FATAL) << "Invalid value for --" << flag_name
+                               << " budget_ratio: " << policy.budget_ratio
+                               << ". Expected a value between 0.0 and 1.0";
+                }
                 return;
             }
             LOG(FATAL) << "Unknown policy parameter in --" << flag_name << ": "
@@ -316,8 +327,8 @@ DEFINE_bool(allow_evict_soft_pinned_objects,
             "Whether to allow eviction of soft pinned objects during eviction");
 DEFINE_string(object_type_eviction_score_policies, "",
               "Per-object-type eviction score policies. Format: "
-              "TYPE:reuse_scale=...,soft_pin_weight=...,eviction_grace=...;"
-              "TYPE:...");
+              "TYPE:reuse_scale=...,soft_pin_weight=...,"
+              "eviction_grace=<milliseconds>;TYPE:...");
 DEFINE_string(object_type_eviction_policies, "",
               "Per-object-type eviction budget policies. Format: "
               "TYPE:budget_ratio=...;TYPE:...");

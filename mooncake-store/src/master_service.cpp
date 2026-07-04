@@ -212,6 +212,10 @@ void SubtractTypeUsedBytes(TenantQuotaState* state,
     }
     auto& type_state = state->object_type_usage[data_type];
     if (type_state.used_bytes < bytes) {
+        LOG(WARNING) << "tenant object type used accounting mismatch tenant="
+                     << tenant_id << ", data_type=" << toString(data_type)
+                     << ", requested=" << bytes
+                     << ", available=" << type_state.used_bytes;
         type_state.used_bytes = 0;
     } else {
         type_state.used_bytes -= bytes;
@@ -307,6 +311,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
     object_type_budget_ratios_.fill(1.0);
     for (const auto& [data_type, policy] :
          config.object_type_eviction_score_policies) {
+        ValidateObjectTypeEvictionScorePolicy(policy);
         const auto idx = static_cast<uint8_t>(data_type);
         object_type_reuse_scales_[idx] = policy.reuse_scale;
         object_type_soft_pin_weights_[idx] = policy.soft_pin_weight;
@@ -314,6 +319,7 @@ MasterService::MasterService(const MasterServiceConfig& config)
     }
     for (const auto& [data_type, policy] :
          config.object_type_eviction_policies) {
+        ValidateObjectTypeEvictionPolicy(policy);
         const auto idx = static_cast<uint8_t>(data_type);
         object_type_budget_ratios_[idx] = policy.budget_ratio;
     }
@@ -6989,178 +6995,6 @@ MasterService::EvictTenantMemoryForQuota(const std::string& tenant_id,
         return result;
     };
 
-    struct TenantEvictionCandidate {
-        size_t shard_idx;
-        std::string key;
-        int64_t adjusted_age;
-    };
-
-    const auto rank_reference_time = now;
-    auto adjusted_age = [this, rank_reference_time](
-                            const ObjectMetadata& metadata,
-                            bool is_soft_pinned) {
-        const auto idx = static_cast<uint8_t>(metadata.data_type);
-        const double reuse_scale = object_type_reuse_scales_[idx];
-        const double weight =
-            is_soft_pinned ? object_type_soft_pin_weights_[idx] : 1.0;
-        const int64_t eviction_grace = object_type_eviction_graces_[idx];
-        auto expired_age =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                rank_reference_time - metadata.lease_timeout)
-                .count();
-        expired_age = std::max<int64_t>(expired_age - eviction_grace, 0);
-        return static_cast<int64_t>(expired_age * weight / reuse_scale);
-    };
-    const bool has_type_budget_policy = std::any_of(
-        object_type_budget_ratios_.begin(), object_type_budget_ratios_.end(),
-        [](double budget_ratio) { return budget_ratio < 1.0; });
-
-    auto evict_tenant_candidates =
-        [&](std::vector<TenantEvictionCandidate>& candidates,
-            long target_evict_num) {
-            if (candidates.empty() || target_evict_num <= 0 ||
-                total.freed_bytes >= target_bytes) {
-                return;
-            }
-            target_evict_num =
-                std::min(target_evict_num, (long)candidates.size());
-
-            std::nth_element(candidates.begin(),
-                             candidates.begin() + (target_evict_num - 1),
-                             candidates.end(),
-                             [](const TenantEvictionCandidate& a,
-                                const TenantEvictionCandidate& b) {
-                                 return a.adjusted_age > b.adjusted_age;
-                             });
-            auto target_adjusted_age =
-                candidates[target_evict_num - 1].adjusted_age;
-
-            long evicted_this_pass = 0;
-            for (auto& candidate : candidates) {
-                if (total.freed_bytes >= target_bytes) {
-                    break;
-                }
-                if (evicted_this_pass >= target_evict_num &&
-                    candidate.adjusted_age < target_adjusted_age) {
-                    continue;
-                }
-                std::vector<std::vector<Replica>> deferred_replicas;
-                {
-                    MetadataShardAccessorRW shard(this, candidate.shard_idx);
-                    auto tenant_it = shard->tenants.find(normalized_tenant);
-                    if (tenant_it == shard->tenants.end()) {
-                        continue;
-                    }
-                    auto& tenant_state = tenant_it->second;
-                    auto it = tenant_state.metadata.find(candidate.key);
-                    if (it == tenant_state.metadata.end()) {
-                        continue;
-                    }
-                    auto& metadata = it->second;
-                    if (!metadata.IsLeaseExpired(now) ||
-                        metadata.IsSoftPinned(now) ||
-                        !can_evict_replicas(metadata)) {
-                        continue;
-                    }
-
-                    auto evict_result = try_evict_group_or_object(
-                        candidate.key, metadata, tenant_state,
-                        deferred_replicas, /*allow_soft_pinned=*/false);
-                    total.freed_bytes += evict_result.freed_bytes;
-                    total.evicted_objects += evict_result.evicted_objects;
-                    evicted_this_pass += evict_result.evicted_objects;
-                    if (!metadata.IsValid()) {
-                        EraseMetadata(tenant_state, it, normalized_tenant);
-                    }
-                    if (tenant_state.Empty()) {
-                        shard->tenants.erase(tenant_it);
-                    }
-                }
-            }
-        };
-
-    std::optional<TenantQuotaSnapshot> quota_snapshot;
-    if (has_type_budget_policy) {
-        quota_snapshot = GetTenantQuotaSnapshot(normalized_tenant);
-    }
-    if (quota_snapshot && quota_snapshot->used_bytes > 0 &&
-        quota_snapshot->effective_quota_bytes > 0) {
-        std::unordered_map<ObjectDataType, std::vector<TenantEvictionCandidate>>
-            per_type_candidates;
-        std::unordered_map<ObjectDataType, long> per_type_eviction_base;
-
-        for (size_t shard_idx = 0; shard_idx < kNumShards; ++shard_idx) {
-            MetadataShardAccessorRW shard(this, shard_idx);
-            auto tenant_it = shard->tenants.find(normalized_tenant);
-            if (tenant_it == shard->tenants.end()) {
-                continue;
-            }
-            for (const auto& [key, metadata] : tenant_it->second.metadata) {
-                if (metadata.IsHardPinned()) {
-                    continue;
-                }
-                const ObjectDataType data_type = metadata.data_type;
-                const bool has_evictable = can_evict_replicas(metadata);
-                if (has_evictable) {
-                    per_type_eviction_base[data_type]++;
-                }
-                if (!metadata.IsLeaseExpired(now) || !has_evictable ||
-                    metadata.IsSoftPinned(now)) {
-                    continue;
-                }
-                per_type_candidates[data_type].push_back(
-                    {shard_idx, key,
-                     adjusted_age(metadata, /*is_soft_pinned=*/false)});
-            }
-        }
-
-        const double tenant_evict_ratio =
-            std::min(1.0, static_cast<double>(target_bytes) /
-                              static_cast<double>(quota_snapshot->used_bytes));
-        for (const auto& [data_type, type_state] :
-             quota_snapshot->object_type_usage) {
-            if (total.freed_bytes >= target_bytes) {
-                break;
-            }
-            if (type_state.used_bytes == 0) {
-                continue;
-            }
-
-            const auto idx = static_cast<uint8_t>(data_type);
-            if (object_type_budget_ratios_[idx] >= 1.0) {
-                continue;
-            }
-            auto base_it = per_type_eviction_base.find(data_type);
-            auto candidates_it = per_type_candidates.find(data_type);
-            if (base_it == per_type_eviction_base.end() ||
-                base_it->second <= 0 ||
-                candidates_it == per_type_candidates.end() ||
-                candidates_it->second.empty()) {
-                continue;
-            }
-
-            const double budget_ratio =
-                std::max(0.0, object_type_budget_ratios_[idx]);
-            const double type_budget_bytes =
-                static_cast<double>(quota_snapshot->effective_quota_bytes) *
-                budget_ratio;
-            const double type_used_bytes =
-                static_cast<double>(type_state.used_bytes);
-            if (type_used_bytes <= type_budget_bytes) {
-                continue;
-            }
-
-            const double type_over_ratio =
-                (type_used_bytes - type_budget_bytes) / type_used_bytes;
-            const double type_evict_ratio =
-                std::min(tenant_evict_ratio, type_over_ratio);
-            long type_evict_num = std::ceil(base_it->second * type_evict_ratio);
-            type_evict_num =
-                std::min(type_evict_num, (long)candidates_it->second.size());
-            evict_tenant_candidates(candidates_it->second, type_evict_num);
-        }
-    }
-
     auto pass = [&](bool allow_soft_pinned) {
         const size_t start_shard = RandomIndex(kNumShards);
         for (size_t scanned = 0;
@@ -7443,7 +7277,12 @@ void MasterService::BatchEvict(double evict_ratio_target,
                 rank_reference_time - metadata.lease_timeout)
                 .count();
         expired_age = std::max<int64_t>(expired_age - eviction_grace, 0);
-        return static_cast<int64_t>(expired_age * weight / reuse_scale);
+        const double score = expired_age * weight / reuse_scale;
+        if (!std::isfinite(score) ||
+            score >= static_cast<double>(std::numeric_limits<int64_t>::max())) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return static_cast<int64_t>(score);
     };
     const bool has_type_budget_policy = std::any_of(
         object_type_budget_ratios_.begin(), object_type_budget_ratios_.end(),

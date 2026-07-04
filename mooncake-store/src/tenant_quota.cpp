@@ -65,6 +65,10 @@ void SubtractTypeUsedBytes(TenantQuotaState* state,
     }
     auto& type_state = state->object_type_usage[data_type];
     if (type_state.used_bytes < bytes) {
+        LOG(WARNING) << "tenant object type used accounting mismatch tenant="
+                     << tenant_id << ", data_type=" << toString(data_type)
+                     << ", requested=" << bytes
+                     << ", available=" << type_state.used_bytes;
         type_state.used_bytes = 0;
     } else {
         type_state.used_bytes -= bytes;
