@@ -7288,14 +7288,13 @@ void MasterService::BatchEvict(double evict_ratio_target,
     // shard_idx + tenant_id + key for safe re-lookup in Phase 2.
     int num_threads = std::min((int)kNumShards, 16);
     size_t shards_per_thread = (kNumShards + num_threads - 1) / num_threads;
-    constexpr size_t kObjectDataTypeCount = 256;
 
     std::vector<std::vector<Candidate>> local_candidates(num_threads);
     std::vector<long> local_eviction_base(num_threads, 0);
     std::vector<long> local_object_count(num_threads, 0);
-    std::vector<std::array<long, kObjectDataTypeCount>>
+    std::vector<std::array<long, UINT8_MAX + 1>>
         local_per_type_eviction_base(num_threads);
-    std::vector<std::array<uint64_t, kObjectDataTypeCount>>
+    std::vector<std::array<uint64_t, UINT8_MAX + 1>>
         local_per_type_used_bytes(num_threads);
     for (auto& counts : local_per_type_eviction_base) counts.fill(0);
     for (auto& used_bytes : local_per_type_used_bytes) used_bytes.fill(0);
@@ -7358,9 +7357,9 @@ void MasterService::BatchEvict(double evict_ratio_target,
     long total_eviction_base = 0;
     for (auto v : local_eviction_base) total_eviction_base += v;
 
-    std::array<long, kObjectDataTypeCount> per_type_eviction_base{};
+    std::array<long, UINT8_MAX + 1> per_type_eviction_base{};
     for (const auto& local_counts : local_per_type_eviction_base) {
-        for (size_t i = 0; i < kObjectDataTypeCount; ++i) {
+        for (size_t i = 0; i < per_type_eviction_base.size(); ++i) {
             per_type_eviction_base[i] += local_counts[i];
         }
     }
@@ -7368,23 +7367,30 @@ void MasterService::BatchEvict(double evict_ratio_target,
     long object_count = 0;
     for (auto v : local_object_count) object_count += v;
 
-    std::array<uint64_t, kObjectDataTypeCount> per_type_used_bytes{};
+    std::array<uint64_t, UINT8_MAX + 1> per_type_used_bytes{};
     for (const auto& local_used_bytes : local_per_type_used_bytes) {
-        for (size_t i = 0; i < kObjectDataTypeCount; ++i) {
+        for (size_t i = 0; i < per_type_used_bytes.size(); ++i) {
             per_type_used_bytes[i] =
                 SaturatingAdd(per_type_used_bytes[i], local_used_bytes[i]);
         }
     }
 
     std::vector<Candidate> candidates;
+    std::array<std::vector<size_t>, UINT8_MAX + 1>
+        per_type_candidate_indices;
     {
         size_t total = 0;
         for (auto& v : local_candidates) total += v.size();
         candidates.reserve(total);
     }
     for (auto& v : local_candidates) {
-        candidates.insert(candidates.end(), std::make_move_iterator(v.begin()),
-                          std::make_move_iterator(v.end()));
+        for (auto& candidate : v) {
+            const size_t candidate_idx = candidates.size();
+            const auto data_type_idx =
+                static_cast<size_t>(candidate.data_type);
+            per_type_candidate_indices[data_type_idx].push_back(candidate_idx);
+            candidates.push_back(std::move(candidate));
+        }
     }
 
     std::vector<int64_t> soft_pin_objects;
