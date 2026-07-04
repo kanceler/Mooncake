@@ -50,14 +50,6 @@ class EvictionStrategy;
 class HttpMetadataServer;
 struct MetadataStoragePlugin;
 
-double ComputeObjectTypeBudgetCorrectionRatio(uint64_t type_used_bytes,
-                                              int64_t total_mem_capacity,
-                                              double budget_ratio,
-                                              double evict_ratio_target);
-
-long ComputeRemainingEvictCount(long total_eviction_base, long evicted_count,
-                                double evict_ratio_target);
-
 // Forward declarations for test classes
 namespace test {
 class MasterServiceSnapshotTestBase;
