@@ -53,9 +53,8 @@ double ComputeObjectTypeBudgetCorrectionRatio(uint64_t type_used_bytes,
         evict_ratio_target <= 0.0) {
         return 0.0;
     }
-    const double type_used_ratio =
-        static_cast<double>(type_used_bytes) /
-        static_cast<double>(total_mem_capacity);
+    const double type_used_ratio = static_cast<double>(type_used_bytes) /
+                                   static_cast<double>(total_mem_capacity);
     const double over_budget_ratio = type_used_ratio - budget_ratio;
     if (over_budget_ratio <= 0.0) {
         return 0.0;
@@ -185,7 +184,8 @@ TenantQuotaSnapshot MakeTenantQuotaSnapshot(const std::string& tenant_id,
         .over_quota = state.over_quota};
 }
 
-void CleanupTypeUsageIfEmpty(TenantQuotaState* state, ObjectDataType data_type) {
+void CleanupTypeUsageIfEmpty(TenantQuotaState* state,
+                             ObjectDataType data_type) {
     auto it = state->object_type_usage.find(data_type);
     if (it == state->object_type_usage.end()) {
         return;
@@ -303,12 +303,14 @@ MasterService::MasterService(const MasterServiceConfig& config)
       offload_cap_ratio_(config.offload_cap_ratio) {
     object_type_reuse_scales_.fill(1.0);
     object_type_soft_pin_weights_.fill(1.0);
+    object_type_eviction_graces_.fill(0);
     object_type_budget_ratios_.fill(1.0);
     for (const auto& [data_type, policy] :
          config.object_type_eviction_score_policies) {
         const auto idx = static_cast<uint8_t>(data_type);
         object_type_reuse_scales_[idx] = policy.reuse_scale;
         object_type_soft_pin_weights_[idx] = policy.soft_pin_weight;
+        object_type_eviction_graces_[idx] = policy.eviction_grace;
     }
     for (const auto& [data_type, policy] :
          config.object_type_eviction_policies) {
@@ -1789,12 +1791,11 @@ MasterService::EraseMetadata(
     switch (quota_mode) {
         case QuotaEraseMode::kFull:
             AbortTenantQuota(tenant_id, metadata.reserved_quota_charge_bytes);
-            ReleaseTenantQuota(tenant_id,
-                               metadata.committed_quota_charge_bytes,
+            ReleaseTenantQuota(tenant_id, metadata.committed_quota_charge_bytes,
                                metadata.data_type);
-            ReleaseTenantQuota(tenant_id,
-                               metadata.pending_replaced_quota_charge_bytes,
-                               metadata.pending_replaced_quota_charge_data_type);
+            ReleaseTenantQuota(
+                tenant_id, metadata.pending_replaced_quota_charge_bytes,
+                metadata.pending_replaced_quota_charge_data_type);
             break;
         case QuotaEraseMode::kPreserveOld:
             AbortTenantQuota(tenant_id, metadata.reserved_quota_charge_bytes);
@@ -3914,8 +3915,7 @@ tl::expected<CopyStartResponse, ErrorCode> MasterService::CopyStart(
         std::piecewise_construct, std::forward_as_tuple(key),
         std::forward_as_tuple(client_id, std::chrono::system_clock::now(),
                               ReplicationTask::Type::COPY, source->id(),
-                              std::move(replica_ids),
-                              reserved_quota_charge));
+                              std::move(replica_ids), reserved_quota_charge));
     if (!task_insert.second) {
         abort_reserved_quota();
         return tl::make_unexpected(ErrorCode::OBJECT_HAS_REPLICATION_TASK);
@@ -4196,8 +4196,7 @@ tl::expected<MoveStartResponse, ErrorCode> MasterService::MoveStart(
         std::piecewise_construct, std::forward_as_tuple(key),
         std::forward_as_tuple(client_id, std::chrono::system_clock::now(),
                               ReplicationTask::Type::MOVE, source->id(),
-                              std::move(replica_ids),
-                              reserved_quota_charge));
+                              std::move(replica_ids), reserved_quota_charge));
     if (!task_insert.second) {
         AbortTenantQuota(object_id.tenant_id, reserved_quota_charge);
         return tl::make_unexpected(ErrorCode::OBJECT_HAS_REPLICATION_TASK);
@@ -7004,11 +7003,12 @@ MasterService::EvictTenantMemoryForQuota(const std::string& tenant_id,
         const double reuse_scale = object_type_reuse_scales_[idx];
         const double weight =
             is_soft_pinned ? object_type_soft_pin_weights_[idx] : 1.0;
+        const int64_t eviction_grace = object_type_eviction_graces_[idx];
         auto expired_age =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 rank_reference_time - metadata.lease_timeout)
                 .count();
-        expired_age = std::max<int64_t>(expired_age, 0);
+        expired_age = std::max<int64_t>(expired_age - eviction_grace, 0);
         return static_cast<int64_t>(expired_age * weight / reuse_scale);
     };
     const bool has_type_budget_policy = std::any_of(
@@ -7114,9 +7114,9 @@ MasterService::EvictTenantMemoryForQuota(const std::string& tenant_id,
             }
         }
 
-        const double tenant_evict_ratio = std::min(
-            1.0, static_cast<double>(target_bytes) /
-                     static_cast<double>(quota_snapshot->used_bytes));
+        const double tenant_evict_ratio =
+            std::min(1.0, static_cast<double>(target_bytes) /
+                              static_cast<double>(quota_snapshot->used_bytes));
         for (const auto& [data_type, type_state] :
              quota_snapshot->object_type_usage) {
             if (total.freed_bytes >= target_bytes) {
@@ -7154,10 +7154,9 @@ MasterService::EvictTenantMemoryForQuota(const std::string& tenant_id,
                 (type_used_bytes - type_budget_bytes) / type_used_bytes;
             const double type_evict_ratio =
                 std::min(tenant_evict_ratio, type_over_ratio);
-            long type_evict_num =
-                std::ceil(base_it->second * type_evict_ratio);
-            type_evict_num = std::min(
-                type_evict_num, (long)candidates_it->second.size());
+            long type_evict_num = std::ceil(base_it->second * type_evict_ratio);
+            type_evict_num =
+                std::min(type_evict_num, (long)candidates_it->second.size());
             evict_tenant_candidates(candidates_it->second, type_evict_num);
         }
     }
@@ -7438,11 +7437,12 @@ void MasterService::BatchEvict(double evict_ratio_target,
         const double reuse_scale = object_type_reuse_scales_[idx];
         const double weight =
             is_soft_pinned ? object_type_soft_pin_weights_[idx] : 1.0;
+        const int64_t eviction_grace = object_type_eviction_graces_[idx];
         auto expired_age =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 rank_reference_time - metadata.lease_timeout)
                 .count();
-        expired_age = std::max<int64_t>(expired_age, 0);
+        expired_age = std::max<int64_t>(expired_age - eviction_grace, 0);
         return static_cast<int64_t>(expired_age * weight / reuse_scale);
     };
     const bool has_type_budget_policy = std::any_of(
@@ -7506,13 +7506,11 @@ void MasterService::BatchEvict(double evict_ratio_target,
                         if (!it->second.IsLeaseExpired(now) || !has_evictable)
                             continue;
                         if (!it->second.IsSoftPinned(now)) {
-                            Candidate candidate{s,
-                                                tenant_id,
-                                                it->first,
-                                                it->second.lease_timeout,
-                                                adjusted_age(
-                                                    it->second,
-                                                    /*is_soft_pinned=*/false)};
+                            Candidate candidate{
+                                s, tenant_id, it->first,
+                                it->second.lease_timeout,
+                                adjusted_age(it->second,
+                                             /*is_soft_pinned=*/false)};
                             local_candidates[t].push_back(candidate);
                             if (has_type_budget_policy) {
                                 local_per_type_candidates[t][data_type]
@@ -7545,11 +7543,10 @@ void MasterService::BatchEvict(double evict_ratio_target,
         for (auto& local : local_per_type_candidates) {
             for (auto& [data_type, local_candidates_for_type] : local) {
                 auto& merged = per_type_candidates[data_type];
-                merged.insert(merged.end(),
-                              std::make_move_iterator(
-                                  local_candidates_for_type.begin()),
-                              std::make_move_iterator(
-                                  local_candidates_for_type.end()));
+                merged.insert(
+                    merged.end(),
+                    std::make_move_iterator(local_candidates_for_type.begin()),
+                    std::make_move_iterator(local_candidates_for_type.end()));
             }
         }
     }
@@ -7709,10 +7706,9 @@ void MasterService::BatchEvict(double evict_ratio_target,
             if (type_evict_ratio <= 0.0) {
                 continue;
             }
-            long type_evict_num =
-                std::ceil(base_it->second * type_evict_ratio);
-            type_evict_num = std::min(
-                type_evict_num, (long)candidates_it->second.size());
+            long type_evict_num = std::ceil(base_it->second * type_evict_ratio);
+            type_evict_num =
+                std::min(type_evict_num, (long)candidates_it->second.size());
             evict_no_soft_pin_candidates(candidates_it->second, type_evict_num,
                                          /*collect_remaining_no_pin=*/false);
         }

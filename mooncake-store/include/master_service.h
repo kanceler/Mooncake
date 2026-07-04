@@ -1430,8 +1430,8 @@ class MasterService {
     void AbortTenantQuota(const std::string& tenant_id, uint64_t bytes);
     void ReleaseTenantQuota(const std::string& tenant_id, uint64_t bytes,
                             ObjectDataType data_type);
-    void ReleaseTenantQuotaPartial(const std::string& tenant_id,
-                                   uint64_t bytes, ObjectDataType data_type);
+    void ReleaseTenantQuotaPartial(const std::string& tenant_id, uint64_t bytes,
+                                   ObjectDataType data_type);
     void CommitAdditionalTenantQuota(const std::string& tenant_id,
                                      uint64_t bytes, ObjectDataType data_type);
     void AbortReplicationTaskQuota(const std::string& tenant_id,
@@ -1548,6 +1548,7 @@ class MasterService {
     const bool allow_evict_soft_pinned_objects_;
     std::array<double, 256> object_type_reuse_scales_;
     std::array<double, 256> object_type_soft_pin_weights_;
+    std::array<int64_t, 256> object_type_eviction_graces_;
     std::array<double, 256> object_type_budget_ratios_;
 
     // Eviction related members

@@ -29,28 +29,23 @@ namespace mooncake::test {
 
 TEST(MasterServiceEvictionBudgetPolicyTest,
      BudgetCorrectionRatioUsesGlobalCapacityOverage) {
-    EXPECT_NEAR(
-        0.02,
-        ComputeObjectTypeBudgetCorrectionRatio(
-            /*type_used_bytes=*/82,
-            /*total_mem_capacity=*/100,
-            /*budget_ratio=*/0.80,
-            /*evict_ratio_target=*/0.05),
-        1e-9);
-    EXPECT_DOUBLE_EQ(
-        0.05,
-        ComputeObjectTypeBudgetCorrectionRatio(
-            /*type_used_bytes=*/95,
-            /*total_mem_capacity=*/100,
-            /*budget_ratio=*/0.80,
-            /*evict_ratio_target=*/0.05));
-    EXPECT_DOUBLE_EQ(
-        0.0,
-        ComputeObjectTypeBudgetCorrectionRatio(
-            /*type_used_bytes=*/79,
-            /*total_mem_capacity=*/100,
-            /*budget_ratio=*/0.80,
-            /*evict_ratio_target=*/0.05));
+    EXPECT_NEAR(0.02,
+                ComputeObjectTypeBudgetCorrectionRatio(
+                    /*type_used_bytes=*/82,
+                    /*total_mem_capacity=*/100,
+                    /*budget_ratio=*/0.80,
+                    /*evict_ratio_target=*/0.05),
+                1e-9);
+    EXPECT_DOUBLE_EQ(0.05, ComputeObjectTypeBudgetCorrectionRatio(
+                               /*type_used_bytes=*/95,
+                               /*total_mem_capacity=*/100,
+                               /*budget_ratio=*/0.80,
+                               /*evict_ratio_target=*/0.05));
+    EXPECT_DOUBLE_EQ(0.0, ComputeObjectTypeBudgetCorrectionRatio(
+                              /*type_used_bytes=*/79,
+                              /*total_mem_capacity=*/100,
+                              /*budget_ratio=*/0.80,
+                              /*evict_ratio_target=*/0.05));
 }
 
 TEST(MasterServiceEvictionBudgetPolicyTest,
@@ -4609,16 +4604,15 @@ TEST_F(MasterServiceTest, TenantQuotaSnapshotBreaksDownUsageByObjectType) {
     EXPECT_TRUE(snapshot->object_type_usage.empty());
 
     ASSERT_TRUE(
-        service_->PutEnd(client_id, "weight_key", tenant_id,
-                         ReplicaType::MEMORY)
+        service_
+            ->PutEnd(client_id, "weight_key", tenant_id, ReplicaType::MEMORY)
             .has_value());
     snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
     ASSERT_TRUE(snapshot.has_value());
     EXPECT_EQ(snapshot->used_bytes, 1024);
     EXPECT_EQ(snapshot->reserved_bytes, 0);
-    EXPECT_EQ(
-        snapshot->object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
-        1024);
+    EXPECT_EQ(snapshot->object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
+              1024);
 
     ReplicateConfig kv_config;
     kv_config.replica_num = 1;
@@ -4634,9 +4628,8 @@ TEST_F(MasterServiceTest, TenantQuotaSnapshotBreaksDownUsageByObjectType) {
     snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
     ASSERT_TRUE(snapshot.has_value());
     EXPECT_EQ(snapshot->used_bytes, 3072);
-    EXPECT_EQ(
-        snapshot->object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
-        1024);
+    EXPECT_EQ(snapshot->object_type_usage.at(ObjectDataType::WEIGHT).used_bytes,
+              1024);
     EXPECT_EQ(
         snapshot->object_type_usage.at(ObjectDataType::KVCACHE).used_bytes,
         2048);
@@ -4645,8 +4638,7 @@ TEST_F(MasterServiceTest, TenantQuotaSnapshotBreaksDownUsageByObjectType) {
         service_->Remove("weight_key", tenant_id, /*force=*/true).has_value());
     snapshot = service_->GetTenantQuotaSnapshotForTesting(tenant_id);
     ASSERT_TRUE(snapshot.has_value());
-    EXPECT_FALSE(
-        snapshot->object_type_usage.contains(ObjectDataType::WEIGHT));
+    EXPECT_FALSE(snapshot->object_type_usage.contains(ObjectDataType::WEIGHT));
     EXPECT_EQ(
         snapshot->object_type_usage.at(ObjectDataType::KVCACHE).used_bytes,
         2048);

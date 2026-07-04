@@ -86,22 +86,22 @@ std::string Trim(std::string_view value) {
 bool ParseObjectDataType(std::string_view value,
                          mooncake::ObjectDataType* data_type) {
     static const std::unordered_map<std::string_view, mooncake::ObjectDataType>
-        type_names{{"UNKNOWN", mooncake::ObjectDataType::UNKNOWN},
-                   {"KVCACHE", mooncake::ObjectDataType::KVCACHE},
-                   {"TENSOR", mooncake::ObjectDataType::TENSOR},
-                   {"WEIGHT", mooncake::ObjectDataType::WEIGHT},
-                   {"SAMPLE", mooncake::ObjectDataType::SAMPLE},
-                   {"ACTIVATION", mooncake::ObjectDataType::ACTIVATION},
-                   {"GRADIENT", mooncake::ObjectDataType::GRADIENT},
-                   {"OPTIMIZER_STATE",
-                    mooncake::ObjectDataType::OPTIMIZER_STATE},
-                   {"METADATA", mooncake::ObjectDataType::METADATA},
-                   {"GENERAL", mooncake::ObjectDataType::GENERAL},
-                   {"HIDDEN_STATE", mooncake::ObjectDataType::HIDDEN_STATE}};
+        type_names{
+            {"UNKNOWN", mooncake::ObjectDataType::UNKNOWN},
+            {"KVCACHE", mooncake::ObjectDataType::KVCACHE},
+            {"TENSOR", mooncake::ObjectDataType::TENSOR},
+            {"WEIGHT", mooncake::ObjectDataType::WEIGHT},
+            {"SAMPLE", mooncake::ObjectDataType::SAMPLE},
+            {"ACTIVATION", mooncake::ObjectDataType::ACTIVATION},
+            {"GRADIENT", mooncake::ObjectDataType::GRADIENT},
+            {"OPTIMIZER_STATE", mooncake::ObjectDataType::OPTIMIZER_STATE},
+            {"METADATA", mooncake::ObjectDataType::METADATA},
+            {"GENERAL", mooncake::ObjectDataType::GENERAL},
+            {"HIDDEN_STATE", mooncake::ObjectDataType::HIDDEN_STATE}};
 
     const std::string normalized = Trim(value);
-    auto it = type_names.find(
-        std::string_view(normalized.data(), normalized.size()));
+    auto it =
+        type_names.find(std::string_view(normalized.data(), normalized.size()));
     if (it == type_names.end()) {
         return false;
     }
@@ -123,6 +123,19 @@ double ParseDoubleFlagFieldOrDie(const char* flag_name, std::string_view field,
     return parsed;
 }
 
+int64_t ParseInt64FlagFieldOrDie(const char* flag_name, std::string_view field,
+                                 std::string_view value) {
+    const std::string normalized = Trim(value);
+    errno = 0;
+    char* end = nullptr;
+    const long long parsed = std::strtoll(normalized.c_str(), &end, 10);
+    if (errno != 0 || end == normalized.c_str() || *end != '\0') {
+        LOG(FATAL) << "Invalid value for --" << flag_name << " " << field
+                   << ": " << normalized;
+    }
+    return static_cast<int64_t>(parsed);
+}
+
 template <typename ParamHandler>
 void ForEachObjectTypePolicyParamOrDie(const char* flag_name,
                                        const std::string& value,
@@ -132,9 +145,8 @@ void ForEachObjectTypePolicyParamOrDie(const char* flag_name,
     while (!remaining.empty()) {
         const size_t sep = remaining.find(';');
         const std::string entry = Trim(remaining.substr(0, sep));
-        remaining = sep == std::string_view::npos
-                        ? std::string_view()
-                        : remaining.substr(sep + 1);
+        remaining = sep == std::string_view::npos ? std::string_view()
+                                                  : remaining.substr(sep + 1);
         if (entry.empty()) {
             continue;
         }
@@ -157,9 +169,8 @@ void ForEachObjectTypePolicyParamOrDie(const char* flag_name,
         while (!params.empty()) {
             const size_t comma = params.find(',');
             const std::string param = Trim(params.substr(0, comma));
-            params = comma == std::string_view::npos
-                         ? std::string_view()
-                         : params.substr(comma + 1);
+            params = comma == std::string_view::npos ? std::string_view()
+                                                     : params.substr(comma + 1);
             if (param.empty()) {
                 continue;
             }
@@ -187,7 +198,8 @@ ParseObjectTypeEvictionScorePoliciesOrDie(const char* flag_name,
                        mooncake::ObjectTypeEvictionScorePolicy>
         policies;
     ForEachObjectTypePolicyParamOrDie(
-        flag_name, value, "TYPE:reuse_scale=...,soft_pin_weight=...",
+        flag_name, value,
+        "TYPE:reuse_scale=...,soft_pin_weight=...,eviction_grace=...",
         [&](mooncake::ObjectDataType data_type, std::string_view key,
             std::string_view param_value) {
             auto& policy = policies[data_type];
@@ -204,6 +216,11 @@ ParseObjectTypeEvictionScorePoliciesOrDie(const char* flag_name,
             if (key == "soft_pin_weight") {
                 policy.soft_pin_weight =
                     ParseDoubleFlagFieldOrDie(flag_name, key, param_value);
+                return;
+            }
+            if (key == "eviction_grace") {
+                policy.eviction_grace =
+                    ParseInt64FlagFieldOrDie(flag_name, key, param_value);
                 return;
             }
             LOG(FATAL) << "Unknown policy parameter in --" << flag_name << ": "
@@ -299,7 +316,8 @@ DEFINE_bool(allow_evict_soft_pinned_objects,
             "Whether to allow eviction of soft pinned objects during eviction");
 DEFINE_string(object_type_eviction_score_policies, "",
               "Per-object-type eviction score policies. Format: "
-              "TYPE:reuse_scale=...,soft_pin_weight=...;TYPE:...");
+              "TYPE:reuse_scale=...,soft_pin_weight=...,eviction_grace=...;"
+              "TYPE:...");
 DEFINE_string(object_type_eviction_policies, "",
               "Per-object-type eviction budget policies. Format: "
               "TYPE:budget_ratio=...;TYPE:...");

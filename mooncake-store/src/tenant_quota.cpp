@@ -37,7 +37,8 @@ TenantQuotaResult AccountingMismatch(const char* operation,
     return tl::make_unexpected(TenantQuotaError::kAccountingMismatch);
 }
 
-void CleanupTypeUsageIfEmpty(TenantQuotaState* state, ObjectDataType data_type) {
+void CleanupTypeUsageIfEmpty(TenantQuotaState* state,
+                             ObjectDataType data_type) {
     auto it = state->object_type_usage.find(data_type);
     if (it == state->object_type_usage.end()) {
         return;
