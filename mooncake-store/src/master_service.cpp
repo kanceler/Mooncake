@@ -157,8 +157,7 @@ TenantQuotaSnapshot MakeTenantQuotaSnapshot(const std::string& tenant_id,
         .over_quota = state.over_quota};
 }
 
-void CleanupTypeUsageIfEmpty(TenantQuotaState* state,
-                             ObjectDataType data_type) {
+void CleanupTypeUsageIfEmpty(TenantQuotaState* state, ObjectDataType data_type) {
     auto it = state->object_type_usage.find(data_type);
     if (it == state->object_type_usage.end()) {
         return;
@@ -1770,11 +1769,12 @@ MasterService::EraseMetadata(
     switch (quota_mode) {
         case QuotaEraseMode::kFull:
             AbortTenantQuota(tenant_id, metadata.reserved_quota_charge_bytes);
-            ReleaseTenantQuota(tenant_id, metadata.committed_quota_charge_bytes,
+            ReleaseTenantQuota(tenant_id,
+                               metadata.committed_quota_charge_bytes,
                                metadata.data_type);
-            ReleaseTenantQuota(
-                tenant_id, metadata.pending_replaced_quota_charge_bytes,
-                metadata.pending_replaced_quota_charge_data_type);
+            ReleaseTenantQuota(tenant_id,
+                               metadata.pending_replaced_quota_charge_bytes,
+                               metadata.pending_replaced_quota_charge_data_type);
             break;
         case QuotaEraseMode::kPreserveOld:
             AbortTenantQuota(tenant_id, metadata.reserved_quota_charge_bytes);
@@ -3894,7 +3894,8 @@ tl::expected<CopyStartResponse, ErrorCode> MasterService::CopyStart(
         std::piecewise_construct, std::forward_as_tuple(key),
         std::forward_as_tuple(client_id, std::chrono::system_clock::now(),
                               ReplicationTask::Type::COPY, source->id(),
-                              std::move(replica_ids), reserved_quota_charge));
+                              std::move(replica_ids),
+                              reserved_quota_charge));
     if (!task_insert.second) {
         abort_reserved_quota();
         return tl::make_unexpected(ErrorCode::OBJECT_HAS_REPLICATION_TASK);
@@ -4175,7 +4176,8 @@ tl::expected<MoveStartResponse, ErrorCode> MasterService::MoveStart(
         std::piecewise_construct, std::forward_as_tuple(key),
         std::forward_as_tuple(client_id, std::chrono::system_clock::now(),
                               ReplicationTask::Type::MOVE, source->id(),
-                              std::move(replica_ids), reserved_quota_charge));
+                              std::move(replica_ids),
+                              reserved_quota_charge));
     if (!task_insert.second) {
         AbortTenantQuota(object_id.tenant_id, reserved_quota_charge);
         return tl::make_unexpected(ErrorCode::OBJECT_HAS_REPLICATION_TASK);

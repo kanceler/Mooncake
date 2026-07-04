@@ -1422,8 +1422,8 @@ class MasterService {
     void AbortTenantQuota(const std::string& tenant_id, uint64_t bytes);
     void ReleaseTenantQuota(const std::string& tenant_id, uint64_t bytes,
                             ObjectDataType data_type);
-    void ReleaseTenantQuotaPartial(const std::string& tenant_id, uint64_t bytes,
-                                   ObjectDataType data_type);
+    void ReleaseTenantQuotaPartial(const std::string& tenant_id,
+                                   uint64_t bytes, ObjectDataType data_type);
     void CommitAdditionalTenantQuota(const std::string& tenant_id,
                                      uint64_t bytes, ObjectDataType data_type);
     void AbortReplicationTaskQuota(const std::string& tenant_id,
