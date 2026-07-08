@@ -24,6 +24,7 @@
 #include "allocation_strategy.h"
 #include "count_min_sketch.h"
 #include "deadline_scheduler.h"
+#include "eviction_policy.h"
 #include "master_metric_manager.h"
 #include "mutex.h"
 #include "segment.h"
@@ -1562,6 +1563,7 @@ class MasterService {
     const uint64_t default_kv_lease_ttl_;     // in milliseconds
     const uint64_t default_kv_soft_pin_ttl_;  // in milliseconds
     const bool allow_evict_soft_pinned_objects_;
+    std::unique_ptr<EvictionPolicy> memory_eviction_policy_;
 
     // Eviction related members
     std::atomic<bool> need_mem_eviction_{
