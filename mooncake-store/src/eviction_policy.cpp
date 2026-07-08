@@ -130,6 +130,26 @@ EvictionStage TypeAwareEvictionPolicy::Evict(
     const EvictionCandidateView& view, const EvictionScope& scope,
     long target_count, bool allow_soft_pinned,
     std::chrono::system_clock::time_point now) const {
+    return SelectVictimsInScope(view, scope, target_count, allow_soft_pinned,
+                                now);
+}
+
+EvictionStage TypeAwareEvictionPolicy::Fallback(
+    const EvictionCandidateView& view, const EvictionScope& parent,
+    long target_count, bool allow_soft_pinned,
+    std::chrono::system_clock::time_point now) const {
+    // Fallback is a single scope-wide victim selection pass. It does not
+    // reassign responsibility or recursively trigger another fallback; the
+    // caller chooses the fallback scope, e.g. global scope after type-scoped
+    // eviction cannot satisfy the target.
+    return SelectVictimsInScope(view, parent, target_count, allow_soft_pinned,
+                                now);
+}
+
+EvictionStage TypeAwareEvictionPolicy::SelectVictimsInScope(
+    const EvictionCandidateView& view, const EvictionScope& scope,
+    long target_count, bool allow_soft_pinned,
+    std::chrono::system_clock::time_point now) const {
     EvictionStage stage{
         .target_count = std::max<long>(target_count, 0),
         .allow_soft_pinned = allow_soft_pinned,
@@ -158,13 +178,6 @@ EvictionStage TypeAwareEvictionPolicy::Evict(
                          });
     }
     return stage;
-}
-
-EvictionStage TypeAwareEvictionPolicy::Fallback(
-    const EvictionCandidateView& view, const EvictionScope& parent,
-    long target_count, bool allow_soft_pinned,
-    std::chrono::system_clock::time_point now) const {
-    return Evict(view, parent, target_count, allow_soft_pinned, now);
 }
 
 int64_t TypeAwareEvictionPolicy::Score(

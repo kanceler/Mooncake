@@ -114,6 +114,11 @@ class TypeAwareEvictionPolicy : public EvictionPolicy {
         const override;
 
    private:
+    EvictionStage SelectVictimsInScope(
+        const EvictionCandidateView& view, const EvictionScope& scope,
+        long target_count, bool allow_soft_pinned,
+        std::chrono::system_clock::time_point now) const;
+
     int64_t Score(const EvictionCandidate& candidate,
                   std::chrono::system_clock::time_point now) const;
 
