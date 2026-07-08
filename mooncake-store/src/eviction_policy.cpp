@@ -149,10 +149,14 @@ EvictionStage TypeAwareEvictionPolicy::Evict(
         stage.refs.push_back(ref);
     }
 
-    std::sort(stage.refs.begin(), stage.refs.end(), [&](size_t lhs, size_t rhs) {
-        return Score(view.candidates[lhs], now) >
-               Score(view.candidates[rhs], now);
-    });
+    if (stage.refs.size() > static_cast<size_t>(stage.target_count)) {
+        auto nth = stage.refs.begin() + (stage.target_count - 1);
+        std::nth_element(stage.refs.begin(), nth, stage.refs.end(),
+                         [&](size_t lhs, size_t rhs) {
+                             return Score(view.candidates[lhs], now) >
+                                    Score(view.candidates[rhs], now);
+                         });
+    }
     return stage;
 }
 

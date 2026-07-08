@@ -119,6 +119,7 @@ TEST(TypeAwareEvictionPolicyTest, EvictRanksWithinScopeByTypePolicyScore) {
         Candidate(0, ObjectDataType::KVCACHE, now - std::chrono::seconds(20)),
         Candidate(1, ObjectDataType::HIDDEN_STATE,
                   now - std::chrono::seconds(100)),
+        Candidate(2, ObjectDataType::KVCACHE, now - std::chrono::seconds(10)),
     });
 
     std::array<ObjectTypeEvictionScorePolicy, kObjectDataTypeCount> score{};
@@ -127,13 +128,12 @@ TEST(TypeAwareEvictionPolicyTest, EvictRanksWithinScopeByTypePolicyScore) {
     TypeAwareEvictionPolicy policy(score, {});
 
     auto stage =
-        policy.Fallback(view, EvictionScope::All(view), 2,
+        policy.Fallback(view, EvictionScope::All(view), 1,
                         /*allow_soft_pinned=*/false, now);
 
-    ASSERT_EQ(stage.refs.size(), 2u);
+    ASSERT_EQ(stage.refs.size(), 3u);
     EXPECT_EQ(stage.refs[0], 0u);
-    EXPECT_EQ(stage.refs[1], 1u);
-    EXPECT_EQ(stage.target_count, 2);
+    EXPECT_EQ(stage.target_count, 1);
 }
 
 TEST(TypeAwareEvictionPolicyTest, FallbackCanIncludeSoftPinnedCandidates) {
@@ -151,9 +151,10 @@ TEST(TypeAwareEvictionPolicyTest, FallbackCanIncludeSoftPinnedCandidates) {
     EXPECT_EQ(no_soft.refs, (std::vector<size_t>{1}));
 
     auto with_soft =
-        policy.Fallback(view, EvictionScope::All(view), 2,
+        policy.Fallback(view, EvictionScope::All(view), 1,
                         /*allow_soft_pinned=*/true, now);
-    EXPECT_EQ(with_soft.refs, (std::vector<size_t>{1, 0}));
+    ASSERT_EQ(with_soft.refs.size(), 2u);
+    EXPECT_EQ(with_soft.refs[0], 1u);
 }
 
 }  // namespace mooncake::test
