@@ -1960,6 +1960,35 @@ TEST_F(MasterServiceTest, MasterConfigParsesLocalFirstStrategy) {
               AllocationStrategyType::LOCAL_FIRST);
 }
 
+TEST_F(MasterServiceTest, MasterConfigPropagatesObjectTypeEvictionPolicy) {
+    MasterConfig config{};
+    const auto hidden_idx = static_cast<uint8_t>(ObjectDataType::HIDDEN_STATE);
+    config.object_type_eviction_score_policies[hidden_idx].reuse_scale = 2.0;
+    config.object_type_eviction_score_policies[hidden_idx].soft_pin_weight =
+        0.5;
+    config.object_type_eviction_score_policies[hidden_idx].eviction_grace =
+        1000;
+    config.object_type_eviction_policies[hidden_idx].budget_ratio = 0.2;
+
+    WrappedMasterServiceConfig wrapped_config(config, 0);
+    MasterServiceConfig service_config(wrapped_config);
+
+    EXPECT_DOUBLE_EQ(
+        service_config.object_type_eviction_score_policies[hidden_idx]
+            .reuse_scale,
+        2.0);
+    EXPECT_DOUBLE_EQ(
+        service_config.object_type_eviction_score_policies[hidden_idx]
+            .soft_pin_weight,
+        0.5);
+    EXPECT_EQ(service_config.object_type_eviction_score_policies[hidden_idx]
+                  .eviction_grace,
+              1000);
+    EXPECT_DOUBLE_EQ(
+        service_config.object_type_eviction_policies[hidden_idx].budget_ratio,
+        0.2);
+}
+
 TEST_F(MasterServiceTest, LocalFirstPutPrefersWriterHost) {
     auto service_config =
         MasterServiceConfig::builder()
